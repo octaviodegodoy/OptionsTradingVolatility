@@ -1,6 +1,7 @@
 import logging
 from scipy import stats
 import numpy as np
+from arch import arch_model
 from mt5_connector import MT5Connector
 
 
@@ -49,7 +50,111 @@ class GARCHCalculation:
         print(f"  Kurtosis: {stats.kurtosis(self.returns):.4f}")
         
         return self.returns
+    
+    def fit_garch_model(self, vol='GARCH', p=1, q=1, mean='Constant', dist='Normal'):
+        """
+        Fit GARCH(1,1) model to log returns
+        
+        GARCH(1,1) specification:
+        r_t = μ + ε_t
+        ε_t = σ_t * z_t
+        σ²_t = ω + α * ε²_{t-1} + β * σ²_{t-1}
+        """
+        if self.returns is None:
+            raise ValueError("Calculate returns first using calculate_log_returns()")
+        
+        # Convert returns to percentage for numerical stability
+        returns_scaled = self.returns_pct
+        
+        # Define GARCH model
+        self.model = arch_model(
+            returns_scaled, 
+            vol=vol, 
+            p=p, 
+            q=q, 
+            mean=mean, 
+            dist=dist
+        )
+        
+        # Fit the model
+        print("Fitting GARCH(1,1) model...")
+        self.fitted_model = self.model.fit(disp='off')
+        
+        print("GARCH(1,1) Model Results:")
+        print("=" * 50)
+        print(self.fitted_model.summary())
+        
+        return self.fitted_model
+    
+    def extract_parameters(self):
+        """
+        Extract GARCH parameters
+        """
+        if self.fitted_model is None:
+            raise ValueError("Fit model first using fit_garch_model()")
+        
+        params = self.fitted_model.params
+        
+        # Extract parameters
+        omega = params['omega']      # Long-term variance
+        alpha = params['alpha[1]']   # ARCH effect (reaction to shocks)
+        beta = params['beta[1]']     # GARCH effect (persistence)
+        
+        # Calculate persistence
+        persistence = alpha + beta
+        
+        # Calculate long-term volatility
+        long_term_var = omega / (1 - persistence)
+        long_term_vol = np.sqrt(long_term_var)
+        
+        results = {
+            'omega': omega,
+            'alpha': alpha,
+            'beta': beta,
+            'persistence': persistence,
+            'long_term_variance': long_term_var,
+            'long_term_volatility': long_term_vol
+        }
+        
+        print("\nGARCH(1,1) Parameters:")
+        print("=" * 30)
+        for key, value in results.items():
+            print(f"{key}: {value:.6f}")
+        
+        return results
 
+    def forecast_volatility(self, horizon=1):
+        """
+        Generate volatility forecasts
+        """
+        if self.fitted_model is None:
+            raise ValueError("Fit model first using fit_garch_model()")
+        
+        # Generate forecasts
+        forecasts = self.fitted_model.forecast(horizon=horizon)
+        
+        # Extract variance forecasts and convert to volatility
+        variance_forecast = forecasts.variance.iloc[-1, :]
+        volatility_forecast = np.sqrt(variance_forecast)
+        
+        print(f"\nVolatility Forecasts (next {horizon} period(s)):")
+        print("=" * 40)
+        for i in range(horizon):
+            print(f"Period {i+1}: {volatility_forecast.iloc[i]:.4f}%")
+        
+        return volatility_forecast
+    
+    def calculate_conditional_volatility(self):
+        """
+        Calculate conditional volatility series
+        """
+        if self.fitted_model is None:
+            raise ValueError("Fit model first using fit_garch_model()")
+        
+        # Extract conditional volatility
+        conditional_vol = self.fitted_model.conditional_volatility
+        
+        return conditional_vol
 
     def calculate_garch(self, prices):
         self.logger.info("Calculating GARCH model...")

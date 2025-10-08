@@ -10,7 +10,8 @@ async def main():
     
     garch_calc.fetch_data()
     garch_calc.calculate_log_returns()
-    logger.info("Starting main function...")
+    garch_calc.fit_garch_model()
+    garch_calc.forecast_volatility()
 
     await asyncio.sleep(5)
 
