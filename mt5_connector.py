@@ -24,10 +24,7 @@ class MT5Connector:
             df['time'] = pd.to_datetime(df['time'], unit='s')
             # Filter out weekends (keep only weekdays)
             df = df[df['time'].dt.weekday < 5]  # 0=Monday, ..., 4=Friday
-            return df
-    
-    
-    
+            return df   
 
 
     def place_order(self,symbolY,symbolX,volumeY,volumeX,orders_type,zscore):
@@ -121,6 +118,36 @@ class MT5Connector:
                 else:
                     print(f"Successfully closed position {ticket} on {symbol}")
 
+    def get_symbol_futures(self,group_name):
+        futures_symbols = mt5.symbols_get(group_name)
+        time_now = int(time.time())
+        next_symbols_fut = {}
+        past_symbols_fut = {}
+        for s in futures_symbols:
+            if s.expiration_time > time_now:
+               next_symbols_fut[s.expiration_time] = s.name
+            elif s.expiration_time < time_now:
+               past_symbols_fut[s.expiration_time] = s.name
+        
+        sorted_next_futures = dict(sorted(next_symbols_fut.items()))
+        current_symbol = list(sorted_next_futures.items())[0]
+
+        return current_symbol
+    
+    def get_options_chain(self,group_name):
+        options_symbols = mt5.symbols_get(group_name)
+        time_now = int(time.time())
+        options_chain = {}
+        for s in options_symbols:
+            if s.expiration_time > time_now:
+               if s.expiration_time not in options_chain:
+                   options_chain[s.expiration_time] = []
+               options_chain[s.expiration_time].append(s.name)
+               options_chain[s.expiration_time].append(s.option_strike)
+
+        sorted_options_chain = dict(sorted(options_chain.items()))
+        options_list = list(sorted_options_chain.items())[0]
+        return options_list
     
     def total_daily_risk(self):
         from_date = datetime.now() - timedelta(hours=12,minutes=0)

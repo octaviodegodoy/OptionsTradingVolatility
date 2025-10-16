@@ -1,5 +1,7 @@
 import numpy as np
 from scipy.stats import norm
+from mt5_connector import MT5Connector
+import asyncio
 
 def d_1(forward, strike, tenor, sigma):
     """
@@ -81,10 +83,13 @@ def fx_call_vol(forward, strike, tenor, price, interest):
     
     return (high + low) / 2
 
-if __name__ == "__main__":
+def test_fx_option_pricing():
+    """
+    Test FX option pricing functions
+    """
     # Example: Calculate implied volatility from market option price
-    forward_price = 100
-    strike_price = 95
+    forward_price = 28.45
+    strike_price = 28
     time_to_expiry_days = 30
     market_option_price = 6.50  # Market price of the call option
     discount_factor = 0.99  # Discount factor (e^(-r*T))
@@ -117,3 +122,26 @@ if __name__ == "__main__":
     print(f"Calculated option price: {calculated_price:.4f}")
     print(f"Market option price: {market_option_price:.4f}")
     print(f"Price difference: {abs(calculated_price - market_option_price):.8f}")
+
+async def get_prices():
+    mt5_conn = MT5Connector()
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        return None, None
+    symbol_y = "BBAS3"
+    spot_data = mt5_conn.get_data(symbol_y)
+    if spot_data is None:
+        print("Failed to get historical data")
+    else:
+        print(f"Retrieved {spot_data.head()} for {symbol_y}")
+
+    option_data = mt5_conn.get_options_chain("BBAS*")
+    if option_data is None:
+        print("Failed to get historical data")
+    else:
+        for option in option_data:
+            if option is not None:
+                print(f"Retrieved {option_data[1][5]} for options chain")
+                break
+
+asyncio.run(get_prices())
