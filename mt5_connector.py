@@ -137,17 +137,31 @@ class MT5Connector:
     def get_options_chain(self,group_name):
         options_symbols = mt5.symbols_get(group_name)
         time_now = int(time.time())
-        options_chain = {}
+        options_names = []
+        expiration_limit = time_now + 60*60*24*40 #40 days ahead
+        print(f"Current time {time_now} and expiration limit {expiration_limit}")
+        expiration_time = 0
+        # get the first expiration time after expiration_limit
         for s in options_symbols:
-            if s.expiration_time > time_now:
-               if s.expiration_time not in options_chain:
-                   options_chain[s.expiration_time] = []
-               options_chain[s.expiration_time].append(s.name)
-               options_chain[s.expiration_time].append(s.option_strike)
+            if s.expiration_time > time_now and s.expiration_time < expiration_limit:
+                expiration_time = s.expiration_time
+                continue
+            
+        print(f"A porra do expiration time {expiration_time} ")
+            
 
-        sorted_options_chain = dict(sorted(options_chain.items()))
-        options_list = list(sorted_options_chain.items())[0]
-        return options_list
+       # converted_date = datetime.fromtimestamp(float(expiration_time))
+        print(f"Expiration limit {expiration_limit}")
+
+        print(f"Expiration time selected {expiration_time}")
+        for s in options_symbols:
+            if s.expiration_time == expiration_time:
+               options_names.append(s.name)
+
+        sorted_options_names = sorted(options_names)
+        return sorted_options_names
+           
+            
     
     def total_daily_risk(self):
         from_date = datetime.now() - timedelta(hours=12,minutes=0)

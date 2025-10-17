@@ -2,6 +2,7 @@ import numpy as np
 from scipy.stats import norm
 from mt5_connector import MT5Connector
 import asyncio
+from datetime import datetime
 
 def d_1(forward, strike, tenor, sigma):
     """
@@ -123,7 +124,7 @@ def test_fx_option_pricing():
     print(f"Market option price: {market_option_price:.4f}")
     print(f"Price difference: {abs(calculated_price - market_option_price):.8f}")
 
-async def get_prices():
+async def get_options_names():
     mt5_conn = MT5Connector()
     if not mt5_conn.initialize():
         print("MT5 initialization failed")
@@ -135,13 +136,14 @@ async def get_prices():
     else:
         print(f"Retrieved {spot_data.head()} for {symbol_y}")
 
-    option_data = mt5_conn.get_options_chain("BBAS*")
-    if option_data is None:
-        print("Failed to get historical data")
-    else:
-        for option in option_data:
-            if option is not None:
-                print(f"Retrieved {option_data[1][5]} for options chain")
-                break
+    values = mt5_conn.get_options_chain("BBAS*")
 
-asyncio.run(get_prices())
+    for option_symbol in values:
+        symbol_info=mt5_conn.get_symbol_info(option_symbol)
+        if symbol_info!=None:
+           ask = symbol_info.ask
+           bid = symbol_info.bid
+           if ask > 0 or bid > 0:
+               print(f"Option: {option_symbol}, Bid: {bid}, Ask: {ask}")
+
+asyncio.run(get_options_names())
