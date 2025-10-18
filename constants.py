@@ -1,3 +1,4 @@
 PERIODS = 252
 SHIFT_PERIODS = 0 
 MAGIC_NUMBER = 345346
+JUROS_DI_ANUAL = ['F','G','H','J','K','M','N','Q','U','V','X','Z']
