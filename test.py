@@ -277,9 +277,7 @@ if __name__ == "__main__":
 
     # Calculate implied volatility
     implied_vol = bs_iv.implied_volatility(market_price)
-    print(f"Implied Volatility: {implied_vol:.4f}")
-
-
+    delta = bs_iv.call_delta(implied_vol)
     vega = bs_iv.vega(implied_vol)
 
-    print(f"Delta: {bs_iv.call_delta(implied_vol):.4f}, Vega: {vega:.4f}")
+    print(f"Implied volatility: {implied_vol:.4f}, Delta: {delta:.4f}, Vega: {vega:.4f}")
