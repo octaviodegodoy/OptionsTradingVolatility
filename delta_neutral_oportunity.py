@@ -282,7 +282,7 @@ def annualize_from_avg_daily_variance(avg_daily_var: float, D: float = D_TRADING
     return math.sqrt(D * avg_daily_var)
 
 def calendar_to_trading_days(days_calendar: int) -> int:
-    return max(1, int(round(days_calendar * (D_TRADING / 365.0))))
+    return max(1, int(round(days_calendar * (D_TRADING / 252.0))))
 
 
 # ------------------------- Core analysis -------------------------
