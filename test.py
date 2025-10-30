@@ -265,12 +265,12 @@ if __name__ == "__main__":
     print("=" * 70)
 
     # Market parameters
-    S = 61.88         # Current stock price
-    K = 62.06         # Strike price
+    S = 142.51         # Current stock price
+    K = 143.00         # Strike price
     T = 0.08        # 3 months to expiration
-    r = 0.135        # 13% risk-free rate
+    r = 0.149        # 14.9% risk-free rate
     q = 0.0        # 0% dividend yield
-    market_price = 1.8  # Observed call option price
+    market_price = 2.56  # Observed call option price
 
     # Create an instance of the BlackScholesIV class
     bs_iv = BlackScholesIV(S=S, K=K, T=T, r=r, q=q)
