@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../PairTradingAlgo"
+		},
+		{
+			"path": "../quantvolatilitypairtrade"
+		},
+		{
+			"path": ".."
+		}
+	],
+	"settings": {}
+}

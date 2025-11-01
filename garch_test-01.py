@@ -2,13 +2,19 @@ import numpy as np
 import pandas as pd
 from arch import arch_model
 
-df = pd.read_csv("price_data.csv", parse_dates=["Date"])
-df = df.sort_values("Date").reset_index(drop=True)
+from mt5_connector import MT5Connector
+mt5_conn = MT5Connector()
+
+df = mt5_conn.get_data("BOVA11")
+print(f" Last price {df.tail(1)}")
+
+#df = pd.read_csv("price_data.csv", parse_dates=["Date"])
+df = df.sort_values("time").reset_index(drop=True)
 
 # Assuming you have 300 daily prices in a list or loaded from a source
 # For example, replace this with your actual data loading
 # prices = pd.read_csv('your_prices.csv')['price'].values  # Example if from CSV
-prices = df["Close"].values  # Use the 'Close' prices from the DataFrame
+prices = df["close"].values  # Use the 'Close' prices from the DataFrame
 
 # Ensure prices are a numpy array
 prices = np.array(prices)
