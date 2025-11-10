@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import time
 import pandas as pd
 
-from constants import CALL_OPTION, PERIODS, SHIFT_PERIODS
+from constants import CALL_OPTION, DAYS_TO_EXPIRY_LIMIT, PERIODS, SHIFT_PERIODS
 
 class MT5Connector:
     
@@ -134,35 +134,27 @@ class MT5Connector:
 
         return current_symbol
     
-    def get_options_chain(self,group_name):
+    def get_options_chain(self,group_name,option_type):
         server_info = mt5.account_info().server
-        print(f"Connected to MT5 server: {server_info}")  
-
+        print(f"Connected to MT5 server: {server_info}")
         options_symbols = mt5.symbols_get(group_name)
+        print(f"Type for option symbols {type(options_symbols)} options symbols for group {group_name}")
         time_now = int(time.time())
         options_names = []
-        expiration_limit = time_now + 60*60*24*30 #30 days ahead
-        print(f"Current time {time_now} and expiration limit {expiration_limit}")
         expiration_time = 0
-        # get the first expiration time after expiration_limit
+        expiration_limit = time_now + DAYS_TO_EXPIRY_LIMIT #30 days ahead
+        print(f"Current time {time_now} and expiration limit {expiration_limit}")
+        # get the last expiration time before expiration_limit
         for s in options_symbols:
-            selected=mt5.symbol_select(s.name,True)
-            if not selected: 
-                print(f"Failed to select {s.name}, error code =",mt5.last_error()) 
-            else:
-                if s.option_right in [0] and s.option_strike > 0 and s.bid > 0 or s.ask > 0 and s.name == 'PETRA381': #call options only
-                     print(f"Server {server_info} Symbol: {s.name} is option {s.option_right} with expiration time {s.expiration_time} and strike {s.option_strike} bid {s.bid} ask {s.ask}")
-                     expiration_time = s.expiration_time
-                     continue
+            if  s.expiration_time < expiration_limit: #call options only
+                expiration_time = s.expiration_time
+                continue
 
-       # converted_date = datetime.fromtimestamp(float(expiration_time))
-        print(f"Expiration limit {expiration_limit}")
-
-        print(f"Expiration time selected {expiration_time}")
         for s in options_symbols:
-            if s.expiration_time == expiration_time:
-               options_names.append(s.name)
-
+            if s.option_right in [option_type] and s.expiration_time == expiration_time: 
+                options_names.append(s.name)
+                       
+        print(f"Selected expiration time {expiration_time} and found {options_names} options")
         sorted_options_names = sorted(options_names)
         return sorted_options_names
            
@@ -238,32 +230,20 @@ class MT5Connector:
     def get_call_option_name_list(self,group_name):
         server_info = mt5.account_info().server
         print(f"Connected to MT5 server: {server_info}")  
-
         options_symbols = mt5.symbols_get(group_name)
         time_now = int(time.time())
-        options_call_names = []
-        expiration_limit = time_now + 60*60*24*30 #30 days ahead
+        options_call_names = {}
+        expiration_limit = time_now + DAYS_TO_EXPIRY_LIMIT #30 days ahead
         print(f"Current time {time_now} and expiration limit {expiration_limit}")
         expiration_time = 0
         # get the first expiration time after expiration_limit
         for s in options_symbols:
             if s.option_right in [CALL_OPTION] and s.expiration_time < expiration_limit: #call options only
-               options_call_names.append(s.name)
-               print(f"Server {server_info} Symbol: {s.name} is option {s.option_right} with expiration time {s.expiration_time} and strike {s.option_strike} bid {s.bid} ask {s.ask}")
+               options_call_names[s.expiration_time] = s.name
                continue
-
-       # converted_date = datetime.fromtimestamp(float(expiration_time))
-        print(f"Expiration limit {expiration_limit}")
-
-        print(f"Expiration time selected {expiration_time}")
-        for s in options_symbols:
-            if s.expiration_time == expiration_time:
-               options_names.append(s.name)
-
-        sorted_options_names = sorted(options_names)
-        return sorted_options_names
-        call_option = mt5.symbol_info(symbol)
-        return call_option
+        
+        sorted_options_call_names = dict(sorted(options_call_names.items()))
+        return list(sorted_options_call_names.values())
 
     def get_put_option_name_list(self,symbol):
         put_option = mt5.symbol_info(symbol)

@@ -25,6 +25,7 @@ from typing import Iterable, List, Optional, Dict, Any, Tuple
 import numpy as np
 from scipy.optimize import minimize
 
+from constants import CALL_OPTION
 from mt5_connector import MT5Connector
 
 D_TRADING = 252.0
@@ -453,8 +454,8 @@ if __name__ == "__main__":
    # underlying_symbol_group = underlying_symbol.replace("11", "*")  # Example adjustment
     underlying_symbol_group = underlying_symbol[:4] + "*"  # Generalize to first 4 chars
     print(f"Fetching options chain for underlying group: {underlying_symbol_group}")
-    chain_names = mt5_conn.get_options_chain(underlying_symbol_group)
-    print(f"Found {len(chain_names)} option symbols")
+    chain_names_calls = mt5_conn.get_options_chain(underlying_symbol_group, CALL_OPTION)
+    print(f"Found {chain_names_calls} call options in the chain.")
 
     chain = [
         # Near 28-day expiry
