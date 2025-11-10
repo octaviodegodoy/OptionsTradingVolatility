@@ -260,6 +260,29 @@ def get_options_names():
 
 # Example Usage
 if __name__ == "__main__":
+
+    mt5_conn = MT5Connector()
+    underlying_symbol = "BOVA11"
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        exit()  
+
+    spot_data = mt5_conn.get_data(underlying_symbol)
+    if spot_data is None:
+        print("Failed to get historical data")
+        exit()
+    else:
+        print(f"Retrieved {spot_data.head(1)} for {underlying_symbol}") 
+
+    
+    data = mt5_conn.get_options_chain("BOVA*")
+    print("\n" + "=" * 70)
+    print("FETCHING OPTIONS CHAIN FOR BOVA*")   
+    option_data = data[0] if data else None
+    print(f"First Option Data: {option_data}")
+    option_details = mt5_conn.get_symbol_info(option_data) if option_data else None
+    print(f"Option Details: {option_details}")
+
     print("\n" + "=" * 70)
     print("EXAMPLE 1: Single Option IV and Delta Calculation")
     print("=" * 70)

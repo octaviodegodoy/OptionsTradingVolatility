@@ -1,162 +1,145 @@
 #!/usr/bin/env python3
 """
-HAR model example with random (synthetic) realized volatility data.
+HAR-based annual volatility forecast from a price series.
 
-- Simulates a persistent daily realized variance (RV) process via AR(1) on log(RV).
-- Builds HAR features: daily (d), weekly (w), monthly (m) using averages of levels, then logs.
-- Fits OLS: log(RV_{t+1}) ~ const + log(RV_t) + log(avg_5 RV) + log(avg_22 RV)
-- Produces one-step-ahead test forecasts with bias-corrected back-transform to levels.
-- Reports coefficients and common forecast metrics (RMSE on log, QLIKE on levels).
+Usage:
+- Provide a pandas Series of CLOSE prices indexed by datetime (daily frequency).
+- By default it treats daily squared log-returns as realized variance (RV).
+- Fit HAR on log(RV) with daily(1), weekly(5) and monthly(22) averaged levels.
+- Forecast next-day RV, bias-correct the log back-transform, then annualize:
+    vol_annual = sqrt(forecast_daily_RV * trading_days)
+
+Notes:
+- For more accurate RV use high-frequency returns to compute intraday-sum RV and feed that series.
+- trading_days default 252; change to your market convention.
 """
 
+from typing import Tuple
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
-# Optional plotting; set to True to see a plot
-PLOT = True
+from mt5_connector import MT5Connector
 
-def simulate_log_rv(T=1000, mu=-1.5, phi=0.97, sigma_eta=0.25, seed=42):
-    """
-    Simulate daily log realized variance log(RV_t) via AR(1).
-    RV_t = exp(logRV_t)
-    """
-    rng = np.random.default_rng(seed)
-    logRV = np.empty(T)
-    logRV[0] = mu / (1 - phi)  # start at unconditional mean
-    for t in range(1, T):
-        logRV[t] = mu + phi * logRV[t - 1] + rng.normal(0.0, sigma_eta)
-    RV = np.exp(logRV)  # realized variance (not volatility)
-    return logRV, RV
 
-def build_har_frame(RV):
+def daily_rv_from_close(prices: pd.Series) -> pd.Series:
     """
-    Build a DataFrame with:
-    - y: log(RV_t)
-    - d: log(RV_t)
-    - w: log( (1/5) * sum_{i=0..4} RV_{t-i} )
-    - m: log( (1/22) * sum_{i=0..21} RV_{t-i} )
-    - y_fwd: log(RV_{t+1})
+    Simple realized variance proxy from daily close prices:
+      returns = ln(P_t / P_{t-1})
+      RV_t = returns**2  (daily realized variance)
+    If you have intraday returns, replace with sum(intraday_returns**2) per day.
     """
-    rv = pd.Series(RV).rename("RV").reset_index(drop=True)
-    y = np.log(rv)
-    w = np.log(rv.rolling(5).mean())
-    m = np.log(rv.rolling(22).mean())
+    lnret = np.log(prices).diff()
+    rv = lnret.pow(2).rename("RV")
+    return rv.dropna()
 
-    df = pd.DataFrame(
-        {
-            "y": y,              # log(RV_t)
-            "d": y,              # daily term at t
-            "w": w,              # weekly (avg of levels) then log
-            "m": m,              # monthly (avg of levels) then log
-        }
-    )
-    df["y_fwd"] = df["y"].shift(-1)  # target: log(RV_{t+1})
-    df = df.dropna().reset_index(drop=True)
+
+def build_har_features(rv: pd.Series) -> pd.DataFrame:
+    """
+    Build HAR features (levels) and log-target (log RV_{t+1}).
+    Returns DataFrame aligned so each row t has predictors computed at t
+    and target 'y_fwd' = log(RV_{t+1}).
+    """
+    df = pd.DataFrame({"RV": rv})
+    # Replace zeros and negative values with small positive number to avoid log issues
+    df["RV"] = df["RV"].replace(0, np.nan).fillna(df["RV"][df["RV"] > 0].min() * 0.01)
+    df["RV"] = df["RV"].clip(lower=1e-10)
+    
+    df["d"] = df["RV"]                       # daily level
+    df["w"] = df["RV"].rolling(window=5).mean()   # weekly avg of levels
+    df["m"] = df["RV"].rolling(window=22).mean()  # monthly avg of levels
+    df["y_fwd"] = np.log(df["RV"].shift(-1))     # target: log RV_{t+1}
+    # Work in logs for regression: predictors are log(levels)
+    df["log_d"] = np.log(df["d"])
+    df["log_w"] = np.log(df["w"])
+    df["log_m"] = np.log(df["m"])
+    df = df.dropna().copy()
+    # Remove any remaining infinite or NaN values
+    df = df.replace([np.inf, -np.inf], np.nan).dropna()
     return df
 
-def fit_har(df, test_horizon=200):
-    """
-    Fit HAR on training set and evaluate on test set.
-    Returns fitted model, metrics, forecasts, and aligned test targets.
-    """
-    # Train/test split preserving order
-    n = len(df)
-    test_horizon = min(test_horizon, n // 3)  # keep enough train data
-    split = n - test_horizon
 
-    X = sm.add_constant(df[["d", "w", "m"]])
+def fit_har_logrv(df: pd.DataFrame) -> Tuple[object, float]:
+    """
+    Fit OLS on log(RV_{t+1}) ~ 1 + log_d + log_w + log_m
+    Returns (fitted_model, in_sample_residual_variance)
+    """
+    X = sm.add_constant(df[["log_d", "log_w", "log_m"]])
     y = df["y_fwd"]
+    model = sm.OLS(y, X).fit()
+    res_var = float(np.mean(model.resid ** 2))  # residual variance in log space
+    return model, res_var
 
-    X_train, y_train = X.iloc[:split], y.iloc[:split]
-    X_test, y_test = X.iloc[split:], y.iloc[split:]
 
-    model = sm.OLS(y_train, X_train).fit()
+def forecast_next_daily_rv(model, res_var: float, last_rv_row: pd.Series) -> float:
+    """
+    last_rv_row must contain columns: log_d, log_w, log_m (computed at last available day t).
+    Returns bias-corrected forecast of RV_{t+1} (level, not log).
+    """
+    X_last = np.array([1.0, last_rv_row["log_d"], last_rv_row["log_w"], last_rv_row["log_m"]])
+    yhat_log = float(np.dot(X_last, model.params.values))
+    # Bias correction for log-normal error
+    f_RV = float(np.exp(yhat_log + 0.5 * res_var))
+    return f_RV
 
-    # In-sample residual variance (for bias-corrected back-transform)
-    yhat_train = model.predict(X_train)
-    res_var = float(np.mean((yhat_train - y_train) ** 2))
 
-    # One-step-ahead predictions on test
-    yhat_test_log = model.predict(X_test)
+def annualize_vol_from_daily_rv(daily_rv: float, trading_days: int = 252) -> float:
+    """
+    Convert daily realized variance to annualized volatility (std dev).
+    vol_annual = sqrt( daily_rv * trading_days )
+    """
+    return float(np.sqrt(daily_rv * trading_days))
 
-    # Back-transform to RV levels with bias correction
-    f_RV_test = np.exp(yhat_test_log + 0.5 * res_var)
-    RV_test_actual = np.exp(y_test)
 
-    # Metrics
-    rmse_log = float(np.sqrt(np.mean((yhat_test_log - y_test) ** 2)))
-    qlike = float(np.mean(RV_test_actual / f_RV_test - np.log(RV_test_actual / f_RV_test) - 1.0))
+# --------- Example end-to-end function ----------
+def har_annual_vol_forecast_from_prices(
+    close_prices: pd.Series,
+    trading_days: int = 252
+) -> Tuple[float, float, object]:
+    """
+    Compute HAR one-step-ahead forecast and return:
+      (annualized_vol, daily_RV_forecast, fitted_model)
+    """
+    if not isinstance(close_prices, pd.Series):
+        raise ValueError("close_prices must be a pandas Series indexed by datetime")
 
-    metrics = {
-        "rmse_log": rmse_log,
-        "qlike": qlike,
-        "train_size": int(split),
-        "test_size": int(len(y_test)),
-        "res_var_train": res_var,
-    }
+    rv = daily_rv_from_close(close_prices)
+    df = build_har_features(rv)
+    if df.shape[0] < 60:
+        raise ValueError("Not enough data after rolling windows to fit HAR (need ~60+ rows).")
 
-    results = {
-        "model": model,
-        "metrics": metrics,
-        "y_test_log": y_test.reset_index(drop=True),
-        "yhat_test_log": yhat_test_log.reset_index(drop=True),
-        "RV_test_actual": RV_test_actual.reset_index(drop=True),
-        "RV_test_forecast": pd.Series(f_RV_test).reset_index(drop=True),
-    }
-    return results
+    model, res_var = fit_har_logrv(df)
+    last_row = df.iloc[-1]
+    f_RV = forecast_next_daily_rv(model, res_var, last_row)
+    vol_annual = annualize_vol_from_daily_rv(f_RV, trading_days=trading_days)
+    return vol_annual, f_RV, model
 
-def main():
-    # 1) Simulate a persistent realized variance process
-    logRV, RV = simulate_log_rv(
-        T=1000,     # number of days
-        mu=-1.5,    # long-run mean of log(RV)
-        phi=0.97,   # persistence
-        sigma_eta=0.25,
-        seed=42
-    )
 
-    # 2) Build HAR features and target
-    df = build_har_frame(RV)
-
-    # 3) Fit and evaluate
-    results = fit_har(df, test_horizon=200)
-    model = results["model"]
-    metrics = results["metrics"]
-
-    print("\n=== HAR coefficients (log RV model) ===")
-    print(model.params.rename({"const": "beta0", "d": "beta_d", "w": "beta_w", "m": "beta_m"}))
-    print("\n=== In-sample summary ===")
-    print(model.summary().tables[0])
-    print(model.summary().tables[1])
-
-    print("\n=== Test metrics ===")
-    for k, v in metrics.items():
-        print(f"{k}: {v:.6f}" if isinstance(v, float) else f"{k}: {v}")
-
-    # 4) Show a few example forecasts in levels (RV)
-    out = pd.DataFrame(
-        {
-            "RV_actual": results["RV_test_actual"],
-            "RV_forecast": results["RV_test_forecast"],
-        }
-    )
-    print("\n=== Sample of test set forecasts (levels: realized variance) ===")
-    print(out.head(10).to_string(index=False))
-
-    # Optional: plot
-    if PLOT:
-        try:
-            import matplotlib.pyplot as plt
-            plt.figure(figsize=(10, 4))
-            plt.plot(out["RV_actual"].values, label="Actual RV (test)")
-            plt.plot(out["RV_forecast"].values, label="Forecast RV (HAR)", alpha=0.8)
-            plt.legend()
-            plt.title("HAR one-step-ahead forecasts on synthetic realized variance")
-            plt.tight_layout()
-            plt.show()
-        except Exception as e:
-            print(f"(Plot skipped: {e})")
-
+# ---------------- Example usage ----------------
 if __name__ == "__main__":
-    main()
+
+    mt5_conn = MT5Connector()
+    underlying_symbol = "BPAC11"
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        exit()  
+
+    spot_data = mt5_conn.get_data(underlying_symbol)
+    if spot_data is None:
+        print("Failed to get historical data")
+        exit()
+    else:
+        print(f"Retrieved {spot_data.head(1)} for {underlying_symbol}") 
+
+    # Example: use daily closes from Yahoo (replace with your series)
+
+    server = mt5_conn.get_account_info().server
+    print(f"Connected to MT5 server: {server}")
+
+    prices = spot_data["close"]
+    print(f"Using {len(prices)} daily close prices for HAR volatility forecast")
+    vol_ann, f_RV_daily, fitted = har_annual_vol_forecast_from_prices(prices)
+    print(f"Next-day forecasted daily RV: {f_RV_daily:.6e}")
+    print(f"Annualized vol (HAR forecast): {vol_ann:.2%}")
+   # print("HAR coefficients:")
+   # print(fitted.params)

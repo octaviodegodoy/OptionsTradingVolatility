@@ -25,6 +25,8 @@ from typing import Iterable, List, Optional, Dict, Any, Tuple
 import numpy as np
 from scipy.optimize import minimize
 
+from mt5_connector import MT5Connector
+
 D_TRADING = 252.0
 SQRT_2PI = math.sqrt(2.0 * math.pi)
 
@@ -432,8 +434,28 @@ if __name__ == "__main__":
         20.9, 21.0, 20.8, 21.2, 21.0, 20.78
     ]
 
-    # Example option chain (replace with live quotes)
-    # Use calendar days to expiry; code maps to trading days internally.
+    mt5_conn = MT5Connector()
+    underlying_symbol = "PETR4"
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        exit()
+
+    server_info = mt5_conn.get_account_info().server
+    print(f"Connected to MT5 server: {server_info}")  
+
+    spot_price_data = mt5_conn.get_data(underlying_symbol)
+    if spot_price_data is None:
+        print("Failed to get historical data")
+        exit()
+    else:
+        print(f"Retrieved {spot_price_data.head(1)} for {underlying_symbol}")
+
+   # underlying_symbol_group = underlying_symbol.replace("11", "*")  # Example adjustment
+    underlying_symbol_group = underlying_symbol[:4] + "*"  # Generalize to first 4 chars
+    print(f"Fetching options chain for underlying group: {underlying_symbol_group}")
+    chain_names = mt5_conn.get_options_chain(underlying_symbol_group)
+    print(f"Found {len(chain_names)} option symbols")
+
     chain = [
         # Near 28-day expiry
         OptionQuote(type="call", K=20.5, T_days_calendar=28, bid=0.85, ask=0.95),
