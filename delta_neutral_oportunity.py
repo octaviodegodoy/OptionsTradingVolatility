@@ -25,7 +25,7 @@ from typing import Iterable, List, Optional, Dict, Any, Tuple
 import numpy as np
 from scipy.optimize import minimize
 
-from constants import CALL_OPTION, PUT_OPTION
+from constants import CALL_OPTION, PUT_OPTION, STRIKE_PRICE_OFFSET
 from mt5_connector import MT5Connector
 
 D_TRADING = 252.0
@@ -437,19 +437,16 @@ if __name__ == "__main__":
 
     mt5_conn = MT5Connector()
     underlying_symbol = "PETR4"
+    spot_price = (mt5_conn.get_symbol_info(underlying_symbol).ask + mt5_conn.get_symbol_info(underlying_symbol).bid)/2
+    print(f"Current spot price for {underlying_symbol}: {spot_price}")
     if not mt5_conn.initialize():
         print("MT5 initialization failed")
         exit()
 
     server_info = mt5_conn.get_account_info().server
-    print(f"Connected to MT5 server: {server_info}")  
-
-    spot_price_data = mt5_conn.get_data(underlying_symbol)
-    if spot_price_data is None:
-        print("Failed to get historical data")
-        exit()
-    else:
-        print(f"Retrieved {spot_price_data.head(1)} for {underlying_symbol}")
+    print(f"Connected to MT5 server: {server_info}")
+    put_strike_threshold = spot_price * (1 - STRIKE_PRICE_OFFSET)
+    call_strike_threshold = spot_price * (1 + STRIKE_PRICE_OFFSET)
 
     underlying_symbol_group = underlying_symbol[:4] + "*"  # Generalize to first 4 chars
     print(f"Fetching options chain for underlying group: {underlying_symbol_group}")
@@ -458,20 +455,27 @@ if __name__ == "__main__":
     for name in chain_names_calls:
         option_ask_price = mt5_conn.get_symbol_info(name).ask
         option_bid_price = mt5_conn.get_symbol_info(name).bid
+        call_option_strike = mt5_conn.get_symbol_info(name).option_strike
+        is_acceptable_strike = call_option_strike >= put_strike_threshold and call_option_strike <= call_strike_threshold
+        if not is_acceptable_strike:
+            continue
         if option_ask_price > 0 and option_bid_price > 0:
             option_price = (option_ask_price + option_bid_price) / 2
             option_strike = mt5_conn.get_symbol_info(name).option_strike
-            print(f" - {name}: {option_price} strike: {option_strike}")
+            print(f" - {name}: {option_price} for call strike: {call_option_strike}")
 
     chain_name_puts = mt5_conn.get_options_chain(underlying_symbol_group, PUT_OPTION)
     print(f"Found {chain_name_puts} put options in the chain.")
     for name in chain_name_puts:
         option_ask_price = mt5_conn.get_symbol_info(name).ask
         option_bid_price = mt5_conn.get_symbol_info(name).bid
-        option_strike = mt5_conn.get_symbol_info(name).option_strike
+        put_option_strike = mt5_conn.get_symbol_info(name).option_strike
+        is_acceptable_strike = put_option_strike >= put_strike_threshold and put_option_strike <= call_strike_threshold
+        if not is_acceptable_strike:
+            continue
         if option_ask_price > 0 and option_bid_price > 0:
             option_price = (option_ask_price + option_bid_price) / 2
-            print(f" - {name}: {option_price} strike: {option_strike}")
+            print(f" - {name}: {option_price} for put strike: {put_option_strike}")
 
     chain = [
         # Near 28-day expiry
