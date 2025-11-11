@@ -142,8 +142,7 @@ class MT5Connector:
         time_now = int(time.time())
         options_names = []
         expiration_time = 0
-        expiration_limit = time_now + DAYS_TO_EXPIRY_LIMIT #30 days ahead
-        print(f"Current time {time_now} and expiration limit {expiration_limit}")
+        expiration_limit = time_now + DAYS_TO_EXPIRY_LIMIT #40 days ahead
         # get the last expiration time before expiration_limit
         for s in options_symbols:
             if  s.expiration_time < expiration_limit: #call options only
@@ -153,8 +152,7 @@ class MT5Connector:
         for s in options_symbols:
             if s.option_right in [option_type] and s.expiration_time == expiration_time: 
                 options_names.append(s.name)
-                       
-        print(f"Selected expiration time {expiration_time} and found {options_names} options")
+
         sorted_options_names = sorted(options_names)
         return sorted_options_names
            

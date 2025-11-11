@@ -25,7 +25,7 @@ from typing import Iterable, List, Optional, Dict, Any, Tuple
 import numpy as np
 from scipy.optimize import minimize
 
-from constants import CALL_OPTION
+from constants import CALL_OPTION, PUT_OPTION
 from mt5_connector import MT5Connector
 
 D_TRADING = 252.0
@@ -451,11 +451,27 @@ if __name__ == "__main__":
     else:
         print(f"Retrieved {spot_price_data.head(1)} for {underlying_symbol}")
 
-   # underlying_symbol_group = underlying_symbol.replace("11", "*")  # Example adjustment
     underlying_symbol_group = underlying_symbol[:4] + "*"  # Generalize to first 4 chars
     print(f"Fetching options chain for underlying group: {underlying_symbol_group}")
     chain_names_calls = mt5_conn.get_options_chain(underlying_symbol_group, CALL_OPTION)
     print(f"Found {chain_names_calls} call options in the chain.")
+    for name in chain_names_calls:
+        option_ask_price = mt5_conn.get_symbol_info(name).ask
+        option_bid_price = mt5_conn.get_symbol_info(name).bid
+        if option_ask_price > 0 and option_bid_price > 0:
+            option_price = (option_ask_price + option_bid_price) / 2
+            option_strike = mt5_conn.get_symbol_info(name).option_strike
+            print(f" - {name}: {option_price} strike: {option_strike}")
+
+    chain_name_puts = mt5_conn.get_options_chain(underlying_symbol_group, PUT_OPTION)
+    print(f"Found {chain_name_puts} put options in the chain.")
+    for name in chain_name_puts:
+        option_ask_price = mt5_conn.get_symbol_info(name).ask
+        option_bid_price = mt5_conn.get_symbol_info(name).bid
+        option_strike = mt5_conn.get_symbol_info(name).option_strike
+        if option_ask_price > 0 and option_bid_price > 0:
+            option_price = (option_ask_price + option_bid_price) / 2
+            print(f" - {name}: {option_price} strike: {option_strike}")
 
     chain = [
         # Near 28-day expiry
