@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.stats import norm
+from constants import CALL_OPTION
 from mt5_connector import MT5Connector
 import asyncio
 from datetime import datetime
@@ -267,17 +268,20 @@ if __name__ == "__main__":
         print("MT5 initialization failed")
         exit()  
 
-    spot_data = mt5_conn.get_data(underlying_symbol)
+    spot_data = mt5_conn.get_symbol_info(underlying_symbol)
+    spot_price = (spot_data.ask + spot_data.bid) / 2 if spot_data else None
+
+    print(f"Current spot price for {underlying_symbol}: {spot_price}")
     if spot_data is None:
         print("Failed to get historical data")
         exit()
     else:
-        print(f"Retrieved {spot_data.head(1)} for {underlying_symbol}") 
+        print(f"Retrieved price {spot_price} for {underlying_symbol}") 
 
     
-    data = mt5_conn.get_options_chain("BOVA*")
+    data = mt5_conn.get_options_chain("PETR*", CALL_OPTION)
     print("\n" + "=" * 70)
-    print("FETCHING OPTIONS CHAIN FOR BOVA*")   
+    print("FETCHING OPTIONS CHAIN FOR PETR*")
     option_data = data[0] if data else None
     print(f"First Option Data: {option_data}")
     option_details = mt5_conn.get_symbol_info(option_data) if option_data else None
@@ -288,9 +292,9 @@ if __name__ == "__main__":
     print("=" * 70)
 
     # Market parameters
-    S = 142.51         # Current stock price
-    K = 143.00         # Strike price
-    T = 0.08        # 3 months to expiration
+    S = spot_price         # Current stock price
+    K = 33.5         # Strike price
+    T = 0.11        # 28 dias to expiration
     r = 0.149        # 14.9% risk-free rate
     q = 0.0        # 0% dividend yield
     market_price = 2.56  # Observed call option price
