@@ -12,10 +12,11 @@ from datetime import datetime
 
 # --- Input: your date / percent pairs ---
 pairs = [
-    ("11/19/2025",  "8.65%"),
-    ("12/1/2025",  "17.25%"),
-    ("1/2/2026",  "10.00%"),
-    ("2/1/2026", "12.50%"),
+    ("10/1/2025","15.92%"),
+    ("9/1/2025","19.90%"),
+    ("8/1/2025","16.91%"),
+    ("7/1/2025","12.91%"),
+    ("5/1/2025","10.72%"),    
 ]
 
 # Parse into pandas objects for convenience
@@ -35,7 +36,7 @@ print("xi (ordinals):", xi_ord)
 print("yi (fractions):", yi_frac.to_numpy())
 
 # --- 1) Evaluate spline at a scalar date (e.g., 2025-08-15) ---
-query_date = pd.to_datetime("1/16/2026")
+query_date = pd.to_datetime("11/1/2025")
 query_ord = float(query_date.toordinal())
 y_at_query = c_spline(xi_ord, yi_frac.to_numpy(), query_ord)
 print(f"Spline at {query_date.date()} -> {y_at_query:.16f} (fraction) -> {y_at_query*100:.14f}%")

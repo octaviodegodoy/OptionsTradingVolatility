@@ -13,8 +13,8 @@ class MT5Connector:
             raise RuntimeError("Failed to initialize MetaTrader 5")
         self.logger = logging.getLogger(__name__)
 
-    def get_data(self, symbol):
-        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, SHIFT_PERIODS, PERIODS)
+    def get_data(self, symbol, timeframe, periods, shift):
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, shift, periods)
         if rates is None:
             self.logger.error(f"Could not get rates for {symbol}")
             return None
@@ -246,6 +246,9 @@ class MT5Connector:
         sorted_options_call_names = dict(sorted(options_call_names.items()))
         print(f"Sorted call options names: {sorted_options_call_names}")
         return list(sorted_options_call_names.values())
+    
+    def get_mt5_connector(self):
+        return mt5
 
     def get_put_option_name_list(self,symbol):
         put_option = mt5.symbol_info(symbol)
