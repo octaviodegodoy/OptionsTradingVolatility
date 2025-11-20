@@ -3,10 +3,15 @@ import pandas as pd
 from arch import arch_model
 import plotly.graph_objects as go
 
+from mt5_connector import MT5Connector
+
 # Assuming you have 300 daily prices in a list or loaded from a source
 # For example, replace this with your actual data loading
 # prices = pd.read_csv('your_prices.csv')['price'].values  # Example if from CSV
 prices = np.random.normal(100, 5, 300)  # Placeholder: 300 random prices around 100 for demonstration
+mt5_conn = MT5Connector()
+df = mt5_conn.get_data("ABEV3")
+prices = df["close"].values
 
 # Ensure prices are a numpy array
 prices = np.array(prices)
@@ -51,4 +56,4 @@ fig.update_layout(
 )
 
 # Show the plot
-fig.show()
+#fig.show()

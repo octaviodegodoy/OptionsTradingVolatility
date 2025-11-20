@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from functions.calculate_garch import GARCHCalculation
+from functions.quant_functions import GARCHCalculation
 from mt5_connector import MT5Connector
 
 

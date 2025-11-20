@@ -225,22 +225,26 @@ class MT5Connector:
         profit = mt5.account_info().profit
         return profit
     
+    def symbol_select(self,symbol,enable):
+        return mt5.symbol_select(symbol,enable)
+    
     def get_call_option_name_list(self,group_name):
         server_info = mt5.account_info().server
         print(f"Connected to MT5 server: {server_info}")  
         options_symbols = mt5.symbols_get(group_name)
         time_now = int(time.time())
         options_call_names = {}
-        expiration_limit = time_now + DAYS_TO_EXPIRY_LIMIT #30 days ahead
+        expiration_limit = time_now + DAYS_TO_EXPIRY_LIMIT #10 days ahead
         print(f"Current time {time_now} and expiration limit {expiration_limit}")
-        expiration_time = 0
         # get the first expiration time after expiration_limit
         for s in options_symbols:
+            
             if s.option_right in [CALL_OPTION] and s.expiration_time < expiration_limit: #call options only
                options_call_names[s.expiration_time] = s.name
                continue
         
         sorted_options_call_names = dict(sorted(options_call_names.items()))
+        print(f"Sorted call options names: {sorted_options_call_names}")
         return list(sorted_options_call_names.values())
 
     def get_put_option_name_list(self,symbol):

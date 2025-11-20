@@ -119,7 +119,7 @@ def har_annual_vol_forecast_from_prices(
 if __name__ == "__main__":
 
     mt5_conn = MT5Connector()
-    underlying_symbol = "PETR4"
+    underlying_symbol = "ABEV3"
     if not mt5_conn.initialize():
         print("MT5 initialization failed")
         exit()  

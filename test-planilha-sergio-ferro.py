@@ -1,34 +1,14 @@
-from math import log, sqrt, exp
+
 from scipy.stats import norm
 from scipy.optimize import newton, brentq
+from constants import CALL_OPTION
+from functions.quant_functions import QuantCalculation
+from mt5_connector import MT5Connector
 
 class BlackScholesCalculator:
     def __init__(self):
         pass
-
-    def d1(self, F, K, T, sigma):
-        # d_1 = (Log(Forward / Strike) + Sigma ^ 2 * (Tenor / 252) / 2) / (Sigma * (Tenor / 252) ^ (1 / 2))
-        T_years = T / 252
-        d1 = (log(F / K) + 0.5 * sigma ** 2 * T_years) / (sigma * sqrt(T_years))
-        return d1
     
-    def d2(self, F, K, T, sigma):
-        d1_value = self.d1(F, K, T, sigma)
-        d2 = d1_value - sigma * sqrt(T / 252)
-        return d2
-    
-    def fx_call(self, F, K, T, sigma, r):
-        d1_value = self.d1(F, K, T, sigma)
-        d2_value = self.d2(F, K, T, sigma)
-
-        Nd1 = norm.cdf(d1_value)
-        Nd2 = norm.cdf(d2_value)
-        call_price = (F * Nd1 - K * Nd2) * r   # Assuming a risk-free rate of 5%
-        
-        if call_price < 0:
-            call_price = 0.0
-
-        return call_price
     
     def fx_put(self, F, K, T, sigma, r):
         d1_value = self.d1(F, K, T, sigma)
@@ -79,75 +59,33 @@ class BlackScholesCalculator:
             print(f"Warning: IV calculation failed - {str(e)}")
             return None
     
-    def fx_call_vol(self, F, K, T, Price, r,method='bisection'):
-        """
-        Calculate implied volatility using bisection method
-        
-        This is a Visual Basic to Python conversion of an implied volatility calculator.
-        Uses bisection search to find the volatility that makes fx_call() equal to Price.
-        
-        Parameters:
-        -----------
-        Forward : float
-            Forward price
-        Strike : float
-            Strike price
-        Tenor : int or float
-            Time to expiration in trading days
-        Price : float
-            Market price of the option
-        Interest : float
-            Interest/scaling factor
-        
-        Returns:
-        --------
-        float
-            Implied volatility (sigma)
-        
-        Example:
-        --------
-        >>> iv = fx_call_vol(29.44, 28, 26, 1.5, 100000)
-        >>> print(f"Implied Volatility: {iv:.8f}")
-        """
-        try:
-            if method == 'bisection':
-                high = 5.0
-                low = 0.0
-                
-                while (high - low) > 0.00000001:
-                    mid = (high + low) / 2
-                    
-                    if self.fx_call(F, K, T, mid, r) > Price:
-                        high = mid
-                    else:
-                        low = mid
-                
-                iv = (high + low) / 2
-
-                 # Validate result
-                if iv < 0 or iv > 5:
-                    return None
-                return iv
-        except (RuntimeError, ValueError) as e:
-            print(f"Warning: IV calculation failed - {str(e)}")
-            return None
 
 if __name__ == "__main__":
-    bs_calc = BlackScholesCalculator()
-    S = (22.50 + 22.42)/2
-    T = 26
-    K = 22.69
-   
-    r = 0.149
-    Interest = ((r+1)**(-(T+1)/252))
-    print(f"Interest value : {Interest}")
-    F = S/Interest
-    print(f"Forward value : {F}")
-    market_price = (0.45 + 0.95)/2
-    print(f"Market Price : {market_price}")    
-    sigma = 0.3
 
-    method = 'bisection'
+    mt5_conn = MT5Connector()
+    symbol_info = mt5_conn.get_symbol_info("ABEV3")
+    selected=mt5_conn.symbol_select("ABEV3",True) 
+    if not selected: 
+        print("Failed to select ABEV3") 
+        mt5_conn.shutdown() 
+        quit() 
+        mt5_conn.symbol_select("ABEV3",True)
 
-    sigma_call = bs_calc.fx_call_vol(F, K, T, market_price, Interest, method)
-    print(f"Implied Volatility (Call) : {sigma_call:.2f}")
+    bid_market_price = symbol_info.bid
+    ask_market_price = symbol_info.ask
+    asset_market_price = (bid_market_price + ask_market_price)/2
+
+    print(f"Asset Market Price : {asset_market_price}")
+
+    quant_calc = QuantCalculation()
+    garch_vol = quant_calc.agarch_estimation(mt5_conn.get_data("ABEV3")["close"].values)
+    print(f"GARCH Volatility : {garch_vol}")
+
+    get_call_option_names = mt5_conn.get_call_option_name_list("ABEV*")
+    print(f"Call Option Names : {get_call_option_names}")
+
+    chain_list = mt5_conn.get_options_chain("ABEV*", CALL_OPTION)
+    print(f"Option Chain DataFrame : {chain_list}")
+
+
+
