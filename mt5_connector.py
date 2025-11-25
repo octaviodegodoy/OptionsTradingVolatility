@@ -1,10 +1,11 @@
+import bisect
 import MetaTrader5 as mt5
 import logging
 from datetime import datetime, timedelta
 import time
 import pandas as pd
 
-from constants import CALL_OPTION, DAYS_TO_EXPIRY_LIMIT, PERIODS, SHIFT_PERIODS
+from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PERIODS, SHIFT_PERIODS
 
 class MT5Connector:
     
@@ -142,12 +143,12 @@ class MT5Connector:
         time_now = int(time.time())
         options_names = []
         expiration_time = 0
-        expiration_limit = time_now + DAYS_TO_EXPIRY_LIMIT #40 days ahead
+        expiration_limit = time_now + MIN_DAYS_TO_EXPIRY #10 days ahead
         # get the last expiration time before expiration_limit
         for s in options_symbols:
-            if  s.expiration_time < expiration_limit: #call options only
+            if  s.expiration_time > expiration_limit: #call options only
                 expiration_time = s.expiration_time
-                continue
+                break
 
         for s in options_symbols:
             if s.option_right in [option_type] and s.expiration_time == expiration_time: 
@@ -234,18 +235,63 @@ class MT5Connector:
         options_symbols = mt5.symbols_get(group_name)
         time_now = int(time.time())
         options_call_names = {}
-        expiration_limit = time_now + DAYS_TO_EXPIRY_LIMIT #10 days ahead
+        expiration_limit = time_now + MIN_DAYS_TO_EXPIRY #10 days ahead
         print(f"Current time {time_now} and expiration limit {expiration_limit}")
         # get the first expiration time after expiration_limit
         for s in options_symbols:
             
-            if s.option_right in [CALL_OPTION] and s.expiration_time < expiration_limit: #call options only
+            if s.option_right in [CALL_OPTION] and s.expiration_time > expiration_limit: #call options only
                options_call_names[s.expiration_time] = s.name
-               continue
+               break
         
         sorted_options_call_names = dict(sorted(options_call_names.items()))
         print(f"Sorted call options names: {sorted_options_call_names}")
         return list(sorted_options_call_names.values())
+    
+    def get_expiration_time(self,symbol):
+        
+        time_now = int(time.time())
+        min_expiration = time_now + MIN_DAYS_TO_EXPIRY #10 days ahead
+        expiration_time = 0
+        options_symbols = mt5.symbols_get(symbol)
+        expiration_times = []
+        chain_expiration = {}
+
+        for s in options_symbols:
+            if s.option_mode == 1: # and s.expiration_time > min_expiration: #call options only
+               expiration_times.append(s.expiration_time)
+               #break
+
+        sorted_expiration_times = list(dict.fromkeys(expiration_times))
+        sorted_expiration_times.sort()
+
+        # Use bisect to find the insertion point
+        index = bisect.bisect_right(sorted_expiration_times, min_expiration)
+
+        # Get the next higher number, if it exists
+        higher_number = sorted_expiration_times[index] if index < len(sorted_expiration_times) else None
+        print(f"Sorted expiration times size is {len(sorted_expiration_times)}")
+
+        for ts in sorted_expiration_times:
+            print(datetime.fromtimestamp(ts).strftime('%A, %d/%m/%Y'))
+
+        # weekdays only
+        weekdays_only = [
+            ts for ts in sorted_expiration_times if datetime.fromtimestamp(ts).weekday() < 5
+            ]
+        print(f"Weekdays only expiration times size is {len(weekdays_only)}")
+
+        print(f"Next date is :{datetime.fromtimestamp(higher_number).strftime('%A, %d/%m/%Y')}")
+
+        for ts in weekdays_only:
+            print(datetime.fromtimestamp(ts).strftime('%A, %d/%m/%Y'))
+
+        filtered_names = [symbol.name for symbol in options_symbols if symbol.expiration_time == higher_number]
+
+        chain_expiration[higher_number] = filtered_names
+
+        return chain_expiration
+        
     
     def get_mt5_connector(self):
         return mt5

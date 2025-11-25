@@ -1,11 +1,15 @@
 
+from datetime import datetime
+import time
 from scipy.stats import norm
 from scipy.optimize import newton, brentq
-from constants import CALL_OPTION
+from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, UNIX_DAYS_IN_SECONDS
 from functions.quant_functions import QuantCalculation
 from mt5_connector import MT5Connector
 from functions.original_spline import c_spline
 import pandas as pd
+
+from utils import count_weekdays
 
 class BlackScholesCalculator:
     def __init__(self):
@@ -75,12 +79,10 @@ if __name__ == "__main__":
 
     bid_market_price = symbol_info.bid
     ask_market_price = symbol_info.ask
-    asset_market_price = (bid_market_price + ask_market_price)/2
-
-    
+    asset_market_price = (bid_market_price + ask_market_price)/2    
 
     quant_calc = QuantCalculation()
-    spot_prices_data = mt5_conn.get_data("ABEV3", mt5_conn.get_mt5_connector().TIMEFRAME_D1, 100, 0)["close"].values
+    spot_prices_data = mt5_conn.get_data("BBAS3", mt5_conn.get_mt5_connector().TIMEFRAME_D1, 100, 0)["close"].values
     garch_vol = quant_calc.agarch_estimation(spot_prices_data)
     print(f"GARCH Volatility : {garch_vol}")
 
@@ -88,7 +90,7 @@ if __name__ == "__main__":
 
     # Obtain Call Option Names
 
-    get_call_option_names = mt5_conn.get_call_option_name_list("ABEV*")
+    get_call_option_names = mt5_conn.get_call_option_name_list("BBAS*")
     print(f"Call Option Names : {get_call_option_names}")
 
     # Get interest rate
@@ -133,6 +135,24 @@ if __name__ == "__main__":
     F = asset_market_price / factor
     print(f"Fut DI Price : {F}")
 
+    print("Test BBAS3 ")
     
+    print(f"Minimum time to expiration for BBAS* options {MIN_DAYS_TO_EXPIRY} seconds")
+    
+    time_now = int(time.time())
+    minimum_exp_time = time_now + MIN_DAYS_TO_EXPIRY
+
+    chain_options = mt5_conn.get_expiration_time("BBAS*")
+
+    print(f"Names for the options after 10 days : {chain_options}")
+    print(f"Minimum Expiration Time : {minimum_exp_time}")
+
+
+    total_days = (list(chain_options.keys())[0] - time_now)/ UNIX_DAYS_IN_SECONDS
+    print(f"T days : {total_days}")
+
+    T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
+
+    print(f"The tenor variable is {T} days")       
 
 
