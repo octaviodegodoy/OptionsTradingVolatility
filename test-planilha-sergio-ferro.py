@@ -142,11 +142,33 @@ if __name__ == "__main__":
     time_now = int(time.time())
     minimum_exp_time = time_now + MIN_DAYS_TO_EXPIRY
 
-    chain_options = mt5_conn.get_expiration_time("BBAS*")
+    chain_options = mt5_conn.get_option_names_by_expiration_time("BBAS*")
 
-    print(f"Names for the options after 10 days : {chain_options}")
+    print(f"Names for the options after 10 days {chain_options[list(chain_options.keys())[0]]}")
     print(f"Minimum Expiration Time : {minimum_exp_time}")
 
+    options_names_list = chain_options[list(chain_options.keys())[0]]
+    print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(list(chain_options.keys())[0])}")
+    for option_name in options_names_list:
+        option_info = mt5_conn.get_symbol_info(option_name)
+        selected_option = mt5_conn.symbol_select(option_name,True)
+        if not selected_option: 
+            print(f"Failed to select option {option_name}") 
+        else:
+            option_info = mt5_conn.get_symbol_info(option_name)
+            bid_option_price = option_info.bid
+            ask_option_price = option_info.ask
+            if option_info is None:
+                print(f"Failed to get info for option {option_name}")
+                continue
+            if bid_option_price == 0.0 or ask_option_price == 0.0:
+                #print(f"Option {option_name} has no market data (bid and ask are zero). Skipping.")
+                continue                
+       
+            option_market_price = (bid_option_price + ask_option_price)/2    
+        
+            print(f"Option Name: {option_name}, Market Price: {option_market_price} bid {bid_option_price} ask {ask_option_price}")
+        
 
     total_days = (list(chain_options.keys())[0] - time_now)/ UNIX_DAYS_IN_SECONDS
     print(f"T days : {total_days}")

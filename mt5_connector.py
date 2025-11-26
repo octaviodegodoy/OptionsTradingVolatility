@@ -248,7 +248,7 @@ class MT5Connector:
         print(f"Sorted call options names: {sorted_options_call_names}")
         return list(sorted_options_call_names.values())
     
-    def get_expiration_time(self,symbol):
+    def get_option_names_by_expiration_time(self,symbol):
         
         time_now = int(time.time())
         min_expiration = time_now + MIN_DAYS_TO_EXPIRY #10 days ahead
