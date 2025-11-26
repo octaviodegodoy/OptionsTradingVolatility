@@ -4,6 +4,6 @@ MAGIC_NUMBER = 345346
 JUROS_DI_ANUAL = ['F','G','H','J','K','M','N','Q','U','V','X','Z']
 CALL_OPTION = 0
 PUT_OPTION = 1
-MIN_DAYS_TO_EXPIRY = 60*60*24*10 # 10 days in seconds
+MIN_DAYS_TO_EXPIRY = 60*60*24*8 # 10 days in seconds
 UNIX_DAYS_IN_SECONDS = 60*60*24
 STRIKE_PRICE_OFFSET = 0.05 # 5% above and below current price

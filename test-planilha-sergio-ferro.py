@@ -1,6 +1,8 @@
 
+from math import log
 from datetime import datetime
 import time
+from pyparsing import Forward
 from scipy.stats import norm
 from scipy.optimize import newton, brentq
 from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, UNIX_DAYS_IN_SECONDS
@@ -14,11 +16,16 @@ from utils import count_weekdays
 class BlackScholesCalculator:
     def __init__(self):
         pass
+
+    def d_1(self, F, K, T, sigma):
+        return (log(F / K) + sigma ** 2 * (T / 252) / 2) / (sigma * (T / 252) ** (1 / 2))
     
+    def d_2(self, F, K, T, sigma):
+        return self.d_1(F, K, T, sigma) - sigma * (T / 252) ** (1 / 2)
     
     def fx_put(self, F, K, T, sigma, r):
-        d1_value = self.d1(F, K, T, sigma)
-        d2_value = self.d2(F, K, T, sigma)
+        d1_value = self.d_1(F, K, T, sigma)
+        d2_value = self.d_2(F, K, T, sigma)
 
         N_neg_d1 = norm.cdf(-d1_value)
         N_neg_d2 = norm.cdf(-d2_value)
@@ -29,6 +36,50 @@ class BlackScholesCalculator:
 
         return put_price
     
+    def fx_call(self, F, K, T, sigma, r):
+        d1_value = self.d_1(F, K, T, sigma)
+        d2_value = self.d_2(F, K, T, sigma)
+        N_d1 = norm.cdf(d1_value)
+        N_d2 = norm.cdf(d2_value)
+        fx_call = (F * N_d1 - K * N_d2) * r
+
+        if fx_call < 0:
+            fx_call = 0.0
+
+        return fx_call
+    
+    def fx_call_vol(self, F, K, T, price, r):
+        
+        high = 5
+        low = 0
+        while (high - low) > 0.00000001:
+            if self.fx_call(F, K, T, (high + low) / 2, r) > price:
+                high = (high + low) / 2
+            else:
+                low = (high + low) / 2
+        
+        
+        return (high + low) / 2
+    
+    def fx_put_vol(self, F, K, T, price, r):
+        
+        high = 5
+        low = 0
+        while (high - low) > 0.00000001:
+            if self.fx_put(F, K, T, (high + low) / 2, r) > price:
+                high = (high + low) / 2
+            else:
+                low = (high + low) / 2
+        
+        print(f"Something here {(high + low) / 2}")
+        return (high + low) / 2
+    
+    def fx_vol(self, F, K, T, price, r, ID):
+        if ID == "call":
+            return self.fx_call_vol(F, K, T, price, r)
+        else:
+            return self.fx_put_vol(F, K, T, price, r)
+
     def implied_volatility(self, market_price, option_type='call', method='newton', 
                           initial_guess=0.3, max_iter=100, tolerance=1e-6):
         # Select pricing function
@@ -69,13 +120,13 @@ class BlackScholesCalculator:
 if __name__ == "__main__":
 
     mt5_conn = MT5Connector()
-    symbol_info = mt5_conn.get_symbol_info("ABEV3")
-    selected=mt5_conn.symbol_select("ABEV3",True) 
+    symbol_info = mt5_conn.get_symbol_info("BBAS3")
+    selected=mt5_conn.symbol_select("BBAS3",True) 
     if not selected: 
-        print("Failed to select ABEV3") 
+        print("Failed to select BBAS3") 
         mt5_conn.shutdown() 
         quit() 
-        mt5_conn.symbol_select("ABEV3",True)
+        mt5_conn.symbol_select("BBAS3",True)
 
     bid_market_price = symbol_info.bid
     ask_market_price = symbol_info.ask
@@ -115,25 +166,7 @@ if __name__ == "__main__":
             x_eval=target_numeric
         )
         return rate
-    
-    # Example: Get rate for specific date
-    future_date = pd.to_datetime('2025-11-20')
-    print(f"Interest Rate Time : {future_date}")
-    print(f"Interest Rate Close (last known): {interest_rates['close'].iloc[-1]}")
-    
-    futures_rate = get_interpolated_rate(future_date)
-    print(f"Futures Rate for {future_date.date()}: {futures_rate}")
-    
-    # You can now easily test different dates:
-    # futures_rate_dec = get_interpolated_rate('2025-12-1')
-    # futures_rate_30days = get_interpolated_rate(pd.Timestamp.now() + pd.DateOffset(days=30))
 
-    # Fut DI
-    T = 32
-    factor = (futures_rate/100+1)**((-T)/252)
-    print(f"Factor : {factor}")
-    F = asset_market_price / factor
-    print(f"Fut DI Price : {F}")
 
     print("Test BBAS3 ")
     
@@ -148,7 +181,27 @@ if __name__ == "__main__":
     print(f"Minimum Expiration Time : {minimum_exp_time}")
 
     options_names_list = chain_options[list(chain_options.keys())[0]]
-    print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(list(chain_options.keys())[0])}")
+    expiration_time = list(chain_options.keys())[0]
+    print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(expiration_time)}")
+    total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
+    print(f"T days : {total_days}")
+
+    T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
+
+
+    print(f"Interest Rate Close (last known): {interest_rates['close'].iloc[-1]}")
+    
+    # expiration_time is a Unix timestamp (seconds); convert to pandas Timestamp for interpolation
+    r = get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
+    print(f"Futures Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
+
+    # Fut DI
+
+    factor = (r/100+1)**((-T)/252)
+    print(f"Factor : {factor}")
+    F = asset_market_price / factor
+    print(f"Fut DI Price : {F}")
+
     for option_name in options_names_list:
         option_info = mt5_conn.get_symbol_info(option_name)
         selected_option = mt5_conn.symbol_select(option_name,True)
@@ -165,16 +218,22 @@ if __name__ == "__main__":
                 #print(f"Option {option_name} has no market data (bid and ask are zero). Skipping.")
                 continue                
        
-            option_market_price = (bid_option_price + ask_option_price)/2    
+            option_market_price = (bid_option_price + ask_option_price)/2
+            K = option_info.option_strike
+            if "C" in option_name:
+                ID = "call"
+            else:
+                ID = "put"
+
+            print(f"Calculating IV for Option: {option_name}, Strike: {K}, Type: {ID}")
+
+            futures_rate = get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
+            print(f"Futures Rate for {pd.to_datetime(expiration_time, unit='s').date()}: {futures_rate}")
+            
+            black_scholes_calculator = BlackScholesCalculator()
+
+            iv = black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, ID)
+            iv = iv * 100  # Convert to percentage
+            print(f"Option Name: {option_name}, future {F} and IV {iv:.2f}%, Market Price: {option_market_price} for {ID} and strike {K} for  T {T} days")
         
-            print(f"Option Name: {option_name}, Market Price: {option_market_price} bid {bid_option_price} ask {ask_option_price}")
-        
-
-    total_days = (list(chain_options.keys())[0] - time_now)/ UNIX_DAYS_IN_SECONDS
-    print(f"T days : {total_days}")
-
-    T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
-
-    print(f"The tenor variable is {T} days")       
-
 

@@ -270,21 +270,6 @@ class MT5Connector:
 
         # Get the next higher number, if it exists
         higher_number = sorted_expiration_times[index] if index < len(sorted_expiration_times) else None
-        print(f"Sorted expiration times size is {len(sorted_expiration_times)}")
-
-        for ts in sorted_expiration_times:
-            print(datetime.fromtimestamp(ts).strftime('%A, %d/%m/%Y'))
-
-        # weekdays only
-        weekdays_only = [
-            ts for ts in sorted_expiration_times if datetime.fromtimestamp(ts).weekday() < 5
-            ]
-        print(f"Weekdays only expiration times size is {len(weekdays_only)}")
-
-        print(f"Next date is :{datetime.fromtimestamp(higher_number).strftime('%A, %d/%m/%Y')}")
-
-        for ts in weekdays_only:
-            print(datetime.fromtimestamp(ts).strftime('%A, %d/%m/%Y'))
 
         filtered_names = [symbol.name for symbol in options_symbols if symbol.expiration_time == higher_number]
 
