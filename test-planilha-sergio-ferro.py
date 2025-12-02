@@ -1,11 +1,13 @@
 
+from ast import If
 from math import log
 from datetime import datetime
 import time
+from prompt_toolkit import Application
 from pyparsing import Forward
 from scipy.stats import norm
 from scipy.optimize import newton, brentq
-from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, UNIX_DAYS_IN_SECONDS
+from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PUT_OPTION, UNIX_DAYS_IN_SECONDS
 from functions.quant_functions import QuantCalculation
 from mt5_connector import MT5Connector
 from functions.original_spline import c_spline
@@ -22,6 +24,31 @@ class BlackScholesCalculator:
     
     def d_2(self, F, K, T, sigma):
         return self.d_1(F, K, T, sigma) - sigma * (T / 252) ** (1 / 2)
+    
+
+    def fx_delta_call(self, F, K, T, sigma, r, spot):
+        x = self.d_1(F, K, T, sigma)
+        if spot == 0:
+            delta_call = norm.cdf(x)
+        else:
+            delta_call = F / (spot * r) * norm.cdf(x)
+        
+        return delta_call
+    
+    def fx_delta_put(self, F, K, T, sigma, r, spot):
+        x = self.d_1(F, K, T, sigma)
+        if spot == 0:
+            delta_put = norm.cdf(x) - 1
+        else:
+            delta_put = F / (spot * r) * (norm.cdf(x) - 1)
+        
+        return delta_put
+    
+    def fx_delta(self, F, K, T, sigma, r, ID, spot):
+        if ID == CALL_OPTION:
+            return self.fx_delta_call(F, K, T, sigma, r, spot)
+        elif ID == PUT_OPTION:
+            return self.fx_delta_put(F, K, T, sigma, r, spot)
     
     def fx_put(self, F, K, T, sigma, r):
         d1_value = self.d_1(F, K, T, sigma)
@@ -71,14 +98,35 @@ class BlackScholesCalculator:
             else:
                 low = (high + low) / 2
         
-        print(f"Something here {(high + low) / 2}")
         return (high + low) / 2
     
     def fx_vol(self, F, K, T, price, r, ID):
-        if ID == "call":
+        if ID == CALL_OPTION:
             return self.fx_call_vol(F, K, T, price, r)
-        else:
+        elif ID == PUT_OPTION:
             return self.fx_put_vol(F, K, T, price, r)
+        
+        # Helper function to get interpolated rate for any future date
+    def get_interpolated_rate(self, target_date):
+        """Get interpolated interest rate for a specific date"""
+         # Get interest rate
+        data = mt5_conn.get_data("DI1@", mt5_conn.get_mt5_connector().TIMEFRAME_MN1, 7, 0)
+        interest_rates = data.sort_index(ascending=True)
+
+        # Convert timestamps to numeric values (days since first date) for spline interpolation
+        time_numeric = (interest_rates['time'] - interest_rates['time'].iloc[0]).dt.total_seconds() / 86400
+
+        if isinstance(target_date, str):
+            target_date = pd.to_datetime(target_date)
+        
+        target_numeric = (target_date - interest_rates['time'].iloc[0]).total_seconds() / 86400
+        
+        rate = c_spline(
+            x_data=time_numeric.values,
+            y_data=interest_rates['close'].values,
+            x_eval=target_numeric
+        )
+        return rate
 
     def implied_volatility(self, market_price, option_type='call', method='newton', 
                           initial_guess=0.3, max_iter=100, tolerance=1e-6):
@@ -115,6 +163,19 @@ class BlackScholesCalculator:
         except (RuntimeError, ValueError) as e:
             print(f"Warning: IV calculation failed - {str(e)}")
             return None
+        
+
+def selection_condition(option_info, bid_option_price, ask_option_price, asset_market_price, K):
+    if option_info is None:
+        print(f"Failed to get info for option {option_name}")
+        return False
+    if bid_option_price == 0.0 or ask_option_price == 0.0 or asset_market_price > K * (1 + 0.05) or asset_market_price < K * (1 - 0.05):
+        #print(f"Option {option_name} has no market data (bid and ask are zero). Skipping.")
+        return False                
+    return True
+        
+
+
     
 
 if __name__ == "__main__":
@@ -130,45 +191,7 @@ if __name__ == "__main__":
 
     bid_market_price = symbol_info.bid
     ask_market_price = symbol_info.ask
-    asset_market_price = (bid_market_price + ask_market_price)/2    
-
-    quant_calc = QuantCalculation()
-    spot_prices_data = mt5_conn.get_data("BBAS3", mt5_conn.get_mt5_connector().TIMEFRAME_D1, 100, 0)["close"].values
-    garch_vol = quant_calc.agarch_estimation(spot_prices_data)
-    print(f"GARCH Volatility : {garch_vol}")
-
-    print(f"Asset Market Price : {asset_market_price}")
-
-    # Obtain Call Option Names
-
-    get_call_option_names = mt5_conn.get_call_option_name_list("BBAS*")
-    print(f"Call Option Names : {get_call_option_names}")
-
-    # Get interest rate
-    data = mt5_conn.get_data("DI1@", mt5_conn.get_mt5_connector().TIMEFRAME_MN1, 7, 0)
-    interest_rates = data.sort_index(ascending=True)
-    print(f"Interest Rate : {interest_rates}")
-
-    # Convert timestamps to numeric values (days since first date) for spline interpolation
-    time_numeric = (interest_rates['time'] - interest_rates['time'].iloc[0]).dt.total_seconds() / 86400
-    
-    # Helper function to get interpolated rate for any future date
-    def get_interpolated_rate(target_date):
-        """Get interpolated interest rate for a specific date"""
-        if isinstance(target_date, str):
-            target_date = pd.to_datetime(target_date)
-        
-        target_numeric = (target_date - interest_rates['time'].iloc[0]).total_seconds() / 86400
-        
-        rate = c_spline(
-            x_data=time_numeric.values,
-            y_data=interest_rates['close'].values,
-            x_eval=target_numeric
-        )
-        return rate
-
-
-    print("Test BBAS3 ")
+    asset_market_price = (bid_market_price + ask_market_price)/2       
     
     print(f"Minimum time to expiration for BBAS* options {MIN_DAYS_TO_EXPIRY} seconds")
     
@@ -185,55 +208,59 @@ if __name__ == "__main__":
     print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(expiration_time)}")
     total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
     print(f"T days : {total_days}")
+    quant_calc = QuantCalculation()
+    spot_prices_data = mt5_conn.get_data("BBAS3", mt5_conn.get_mt5_connector().TIMEFRAME_D1, 100, 0)["close"].values
+    garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
+    print(f"GARCH Volatility : {garch_vol:.2f}%")
 
-    T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
+    print(f"Asset Market Price : {asset_market_price:.2f}")   
 
+    print("Asset BBAS3 ")
 
-    print(f"Interest Rate Close (last known): {interest_rates['close'].iloc[-1]}")
-    
-    # expiration_time is a Unix timestamp (seconds); convert to pandas Timestamp for interpolation
-    r = get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
-    print(f"Futures Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
-
+    black_scholes_calculator = BlackScholesCalculator()
     # Fut DI
 
+   
+    T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
+    
+    # expiration_time is a Unix timestamp (seconds); convert to pandas Timestamp for interpolation
+    r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
+    print(f"Futures Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
     factor = (r/100+1)**((-T)/252)
     print(f"Factor : {factor}")
     F = asset_market_price / factor
-    print(f"Fut DI Price : {F}")
+    print(f"Fut DI Price : {F:.2f}")
 
     for option_name in options_names_list:
         option_info = mt5_conn.get_symbol_info(option_name)
         selected_option = mt5_conn.symbol_select(option_name,True)
+
         if not selected_option: 
             print(f"Failed to select option {option_name}") 
         else:
             option_info = mt5_conn.get_symbol_info(option_name)
             bid_option_price = option_info.bid
             ask_option_price = option_info.ask
+            option_market_price = (bid_option_price + ask_option_price)/2
+            K = option_info.option_strike
+            option_type = option_info.option_right  # 1 for call, 2 for put
+
+
             if option_info is None:
                 print(f"Failed to get info for option {option_name}")
                 continue
-            if bid_option_price == 0.0 or ask_option_price == 0.0:
+            if bid_option_price == 0.0 or ask_option_price == 0.0 or asset_market_price > K * (1 + 0.05) or asset_market_price < K * (1 - 0.05):
                 #print(f"Option {option_name} has no market data (bid and ask are zero). Skipping.")
                 continue                
        
-            option_market_price = (bid_option_price + ask_option_price)/2
-            K = option_info.option_strike
-            if "C" in option_name:
-                ID = "call"
-            else:
-                ID = "put"
 
-            print(f"Calculating IV for Option: {option_name}, Strike: {K}, Type: {ID}")
-
-            futures_rate = get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
-            print(f"Futures Rate for {pd.to_datetime(expiration_time, unit='s').date()}: {futures_rate}")
-            
-            black_scholes_calculator = BlackScholesCalculator()
-
-            iv = black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, ID)
+               
+            # Calculate implied volatility
+            iv = black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, option_type)
+            delta = black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
+            print(f"Delta Call for option {option_name} : {delta:.2f}")
             iv = iv * 100  # Convert to percentage
-            print(f"Option Name: {option_name}, future {F} and IV {iv:.2f}%, Market Price: {option_market_price} for {ID} and strike {K} for  T {T} days")
+            option_type_str = "Call" if option_type == CALL_OPTION else "Put"
+            print(f"Option Name: {option_name}, future {F:.2f}, rate {r:.2f} and IV {iv:.2f}%, Market Price: {option_market_price:.2f} for {option_type_str} and strike {K} for  T {T} days")
         
 
