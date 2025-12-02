@@ -268,10 +268,8 @@ if __name__ == "__main__":
 
             if option_type == CALL_OPTION:
                 call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name}
-                call_deltas_list.append(delta)
             elif option_type == PUT_OPTION:
                 put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name}
-                put_deltas_list.append(delta)
     
 
     if call_deltas_dict:
@@ -288,11 +286,12 @@ if __name__ == "__main__":
         # Calculate IV difference
         if closest_lower is not None and closest_upper is not None:
             iv_diff = call_deltas_dict[closest_upper]['iv'] - call_deltas_dict[closest_lower]['iv']
+            call_delta_diff = closest_upper - closest_lower
         else:
             iv_diff = None
         
         print(f"Call Deltas: {deltas}")
-        print(f"Average Call Delta: {avg_call_delta:.2f} ± {std_call_delta:.2f}")
+        print(f"Average Call Delta: {avg_call_delta:.2f} ± {std_call_delta:.2f} delta diff {call_delta_diff:.2f}")
         print(f"Closest existing deltas: Lower={closest_lower:.2f} option name {call_deltas_dict[closest_lower]['option_name']} with (IV={call_deltas_dict[closest_lower]['iv']:.2f}%), Upper={closest_upper:.2f} and option name {call_deltas_dict[closest_upper]['option_name']}  with (IV={call_deltas_dict[closest_upper]['iv']:.2f}%) diff IV={iv_diff:.2f}%" if iv_diff is not None else "N/A  (IV difference)")
     else:
         print(f"Call Deltas: {list(call_deltas_dict.keys())}")
@@ -306,17 +305,21 @@ if __name__ == "__main__":
         # Find closest deltas to ±1 std from mean
         lower_bound = avg_put_delta - std_put_delta
         upper_bound = avg_put_delta + std_put_delta
+        print(f" Put lower and upper bounds {lower_bound}  :   {upper_bound}")
         closest_lower = min([d for d in deltas if -0.75 < d < -0.25], key=lambda x: abs(x - lower_bound), default=None)
         closest_upper = min([d for d in deltas if -0.75 < d < -0.25], key=lambda x: abs(x - upper_bound), default=None)
-        
+        print(f" lower and upper {closest_lower}  :   {closest_upper}")
+        put_delta_diff = None
+        iv_diff = None
         # Calculate IV difference
         if closest_lower is not None and closest_upper is not None:
             iv_diff = put_deltas_dict[closest_upper]['iv'] - put_deltas_dict[closest_lower]['iv']
+            put_delta_diff = closest_upper - closest_lower
         else:
             iv_diff = None
         
         print(f"Put Deltas: {deltas}")
-        print(f"Average Put Delta: {avg_put_delta:.2f} ± {std_put_delta:.2f}")
+        print(f"Average Put Delta: {avg_put_delta:.2f} ± {std_put_delta:.2f} delta diff {put_delta_diff:.2f}")
         print(f"Closest existing deltas: Lower={closest_lower:.2f} option name {put_deltas_dict[closest_lower]['option_name']} with (IV={put_deltas_dict[closest_lower]['iv']:.2f}%), Upper={closest_upper:.2f} and option name {put_deltas_dict[closest_upper]['option_name']} (IV={put_deltas_dict[closest_upper]['iv']:.2f}%) diff IV={iv_diff:.2f}%" if iv_diff is not None else "N/A  (IV difference)")
     else:
         print(f"Put Deltas: {list(put_deltas_dict.keys())}")
