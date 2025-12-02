@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 from scipy.stats import norm
 from scipy.optimize import newton, brentq
-from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PUT_OPTION, UNIX_DAYS_IN_SECONDS
+from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PUT_OPTION, STRIKE_PRICE_OFFSET, UNIX_DAYS_IN_SECONDS
 from functions.quant_functions import QuantCalculation
 from mt5_connector import MT5Connector
 from functions.original_spline import c_spline
@@ -163,12 +163,16 @@ class BlackScholesCalculator:
             return None
         
 
-def selection_condition(option_info, bid_option_price, ask_option_price, asset_market_price, K):
+def selection_condition(option_info, asset_market_price):
+    bid_option_price = option_info.bid
+    ask_option_price = option_info.ask
+    option_market_price = (bid_option_price + ask_option_price)/2
+    K = option_info.option_strike
+    option_type = option_info.option_right  # 1 for call, 2 for put
     if option_info is None:
         print(f"Failed to get info for option {option_name}")
         return False
-    if bid_option_price == 0.0 or ask_option_price == 0.0 or asset_market_price > K * (1 + 0.05) or asset_market_price < K * (1 - 0.05):
-        #print(f"Option {option_name} has no market data (bid and ask are zero). Skipping.")
+    if bid_option_price == 0.0 or ask_option_price == 0.0 or asset_market_price > K * (1 + STRIKE_PRICE_OFFSET) or asset_market_price < K * (1 - STRIKE_PRICE_OFFSET):
         return False                
     return True
         
@@ -216,8 +220,6 @@ if __name__ == "__main__":
     print("Asset BBAS3 ")
 
     black_scholes_calculator = BlackScholesCalculator()
-    # Fut DI
-
    
     T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
     
@@ -228,7 +230,8 @@ if __name__ == "__main__":
     print(f"Factor : {factor}")
     F = asset_market_price / factor
     print(f"Fut DI Price : {F:.2f}")
-
+    call_deltas_list = []
+    put_deltas_list = []
     for option_name in options_names_list:
         option_info = mt5_conn.get_symbol_info(option_name)
         selected_option = mt5_conn.symbol_select(option_name,True)
@@ -237,28 +240,66 @@ if __name__ == "__main__":
             print(f"Failed to select option {option_name}") 
         else:
             option_info = mt5_conn.get_symbol_info(option_name)
-            bid_option_price = option_info.bid
-            ask_option_price = option_info.ask
-            option_market_price = (bid_option_price + ask_option_price)/2
-            K = option_info.option_strike
-            option_type = option_info.option_right  # 1 for call, 2 for put
-
 
             if option_info is None:
                 print(f"Failed to get info for option {option_name}")
                 continue
-            if bid_option_price == 0.0 or ask_option_price == 0.0 or asset_market_price > K * (1 + 0.05) or asset_market_price < K * (1 - 0.05):
+            if not selection_condition(option_info, asset_market_price):
                 #print(f"Option {option_name} has no market data (bid and ask are zero). Skipping.")
                 continue                
        
-
+            bid_option_price = option_info.bid
+            ask_option_price = option_info.ask
+            option_market_price = (bid_option_price + ask_option_price)/2
+            K = option_info.option_strike
+            option_type = option_info.option_right  # 0 for call, 1 for put
                
             # Calculate implied volatility
             iv = black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, option_type)
             delta = black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
-            print(f"Delta Call for option {option_name} : {delta:.2f}")
-            iv = iv * 100  # Convert to percentage
+            delta = round(delta, 2)
             option_type_str = "Call" if option_type == CALL_OPTION else "Put"
-            print(f"Option Name: {option_name}, future {F:.2f}, rate {r:.2f} and IV {iv:.2f}%, Market Price: {option_market_price:.2f} for {option_type_str} and strike {K} for  T {T} days")
-        
+            iv = iv * 100  # Convert to percentage
+            diff_vol = garch_vol - iv
+            print(f"GARCH - IV for option {option_name} is {garch_vol:.2f}% : {iv:.2f}% diff is {diff_vol:.2f}% delta {delta:.2f}")
 
+            if option_type == CALL_OPTION:  
+                call_deltas_list.append(delta)
+            elif option_type == PUT_OPTION:
+                put_deltas_list.append(delta)
+
+    if call_deltas_list:
+        avg_call_delta = sum(call_deltas_list) / len(call_deltas_list)
+        std_call_delta = (sum((x - avg_call_delta) ** 2 for x in call_deltas_list) / len(call_deltas_list)) ** 0.5
+        
+        # Find closest deltas to ±1 std from mean
+        lower_bound = avg_call_delta - std_call_delta
+        upper_bound = avg_call_delta + std_call_delta
+        closest_lower = min(call_deltas_list, key=lambda x: abs(x - lower_bound))
+        closest_upper = min(call_deltas_list, key=lambda x: abs(x - upper_bound))
+        
+        print(f"Call Deltas: {call_deltas_list}")
+        print(f"Average Call Delta: {avg_call_delta:.2f} ± {std_call_delta:.2f}")
+        print(f"Range: [{avg_call_delta - std_call_delta:.2f}, {avg_call_delta + std_call_delta:.2f}]")
+        print(f"Closest existing deltas: Lower={closest_lower:.2f}, Upper={closest_upper:.2f}")
+    else:
+        print(f"Call Deltas: {call_deltas_list}")
+        print("Average Call Delta: N/A (no data)")
+       
+    if put_deltas_list:
+        avg_put_delta = sum(put_deltas_list) / len(put_deltas_list)
+        std_put_delta = (sum((x - avg_put_delta) ** 2 for x in put_deltas_list) / len(put_deltas_list)) ** 0.5
+        
+        # Find closest deltas to ±1 std from mean
+        lower_bound = avg_put_delta - std_put_delta
+        upper_bound = avg_put_delta + std_put_delta
+        closest_lower = min(put_deltas_list, key=lambda x: abs(x - lower_bound))
+        closest_upper = min(put_deltas_list, key=lambda x: abs(x - upper_bound))
+        
+        print(f"Put Deltas: {put_deltas_list}")
+        print(f"Average Put Delta: {avg_put_delta:.2f} ± {std_put_delta:.2f}")
+        print(f"Range: [{avg_put_delta - std_put_delta:.2f}, {avg_put_delta + std_put_delta:.2f}]")
+        print(f"Closest existing deltas: Lower={closest_lower:.2f}, Upper={closest_upper:.2f}")
+    else:
+        print(f"Put Deltas: {put_deltas_list}")
+        print("Average Put Delta: N/A (no data)")
