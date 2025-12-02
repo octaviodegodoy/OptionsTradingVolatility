@@ -3,8 +3,6 @@ from ast import If
 from math import log
 from datetime import datetime
 import time
-from prompt_toolkit import Application
-from pyparsing import Forward
 from scipy.stats import norm
 from scipy.optimize import newton, brentq
 from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PUT_OPTION, UNIX_DAYS_IN_SECONDS
