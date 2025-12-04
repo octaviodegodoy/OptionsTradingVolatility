@@ -1,4 +1,3 @@
-
 from ast import If
 from math import log
 from datetime import datetime
@@ -10,6 +9,7 @@ from functions.quant_functions import QuantCalculation
 from mt5_connector import MT5Connector
 from functions.original_spline import c_spline
 import pandas as pd
+import numpy as np
 
 from utils import count_weekdays
 
@@ -22,6 +22,75 @@ class BlackScholesCalculator:
     
     def d_2(self, F, K, T, sigma):
         return self.d_1(F, K, T, sigma) - sigma * (T / 252) ** (1 / 2)
+    
+    def black_scholes_call(self, F, K, T, sigma, r):
+        """European call option price using Black-Scholes forward formula."""
+        if T <= 0 or sigma <= 0:
+            return 0.0
+        
+        d1 = (np.log(F / K) + 0.5 * sigma**2 * (T / 252)) / (sigma * np.sqrt(T / 252))
+        d2 = d1 - sigma * np.sqrt(T / 252)
+        
+        # Using forward price formula with discount factor
+        call_price = r * (F * norm.cdf(d1) - K * norm.cdf(d2))
+        
+        return max(call_price, 0.0)
+
+    def black_scholes_put(self, F, K, T, sigma, r):
+        """European put option price using Black-Scholes forward formula."""
+        if T <= 0 or sigma <= 0:
+            return 0.0
+        
+        d1 = (np.log(F / K) + 0.5 * sigma**2 * (T / 252)) / (sigma * np.sqrt(T / 252))
+        d2 = d1 - sigma * np.sqrt(T / 252)
+        
+        # Using forward price formula with discount factor
+        put_price = r * (K * norm.cdf(-d2) - F * norm.cdf(-d1))
+        
+        return max(put_price, 0.0)
+
+    def implied_vol(self, F, K, T, price, r, option_type):
+        """
+        Calculate implied volatility using Brent's method.
+        
+        Args:
+            F: Forward price (spot / discount_factor)
+            K: Strike price
+            T: Time to expiration in trading days
+            price: Market price of the option
+            r: Discount factor (not the rate itself)
+            option_type: 0 for call, 1 for put
+        
+        Returns:
+            Implied volatility as decimal (e.g., 0.20 for 20%)
+        """
+        if price <= 0 or T <= 0:
+            return np.nan
+        
+        def objective(sigma):
+            if sigma <= 0:
+                return 1e10
+            
+            if option_type == CALL_OPTION:  # Call option
+                theoretical_price = self.black_scholes_call(F, K, T, sigma, r)
+            elif option_type == PUT_OPTION:  # Put option
+                theoretical_price = self.black_scholes_put(F, K, T, sigma, r)
+            else:
+                return 1e10
+            
+            return theoretical_price - price
+        
+        try:
+            # Search sigma between 0.1% and 500%
+            iv = brentq(objective, 0.001, 5.0, maxiter=100)
+            return iv
+        except (ValueError, RuntimeError) as e:
+            # If brentq fails, try with wider bounds or return NaN
+            try:
+                iv = brentq(objective, 0.0001, 10.0, maxiter=200)
+                return iv
+            except:
+                return np.nan
     
 
     def fx_delta_call(self, F, K, T, sigma, r, spot):
@@ -258,6 +327,8 @@ if __name__ == "__main__":
             option_type = option_info.option_right  # 0 for call, 1 for put
                
             # Calculate implied volatility
+            iv_call_brentq = black_scholes_calculator.implied_vol(F, K, T, option_market_price, factor, option_type)
+            print(f"Option {option_name} IV {iv_call_brentq}")
             iv = black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, option_type)
             delta = black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
             delta = round(delta, 2)

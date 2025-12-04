@@ -258,7 +258,8 @@ class MT5Connector:
         chain_expiration = {}
 
         for s in options_symbols:
-            if s.option_mode == 1: # and s.expiration_time > min_expiration: #call options only
+            
+            if s.option_mode in (0,1): # and s.expiration_time > min_expiration: #call options only
                expiration_times.append(s.expiration_time)
                #break
 
