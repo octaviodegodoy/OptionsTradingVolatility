@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.stats import norm
-from constants import CALL_OPTION
+from constants import CALL_OPTION, PERIODS
 from mt5_connector import MT5Connector
 import asyncio
 from datetime import datetime
@@ -233,15 +233,38 @@ class BlackScholesIV:
                 print(f"Warning: IV calculation failed - {str(e)}")
                 return None
 
+async def test_send_order():
+    mt5_conn = MT5Connector()
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        return
+    
+    chain_options = mt5_conn.get_option_names_by_expiration_time("BBAS*")
+    options_names_list = chain_options[list(chain_options.keys())[0]]
 
+    print(f"Names for the options after 10 days {options_names_list}")
 
-def get_options_names():
+    symbol_y = 'BBASL215W4'  # Example option symbol Y
+    symbol_x = 'BBASL225W4'  # Example option symbol X
+  #  symbol_selected=mt5_conn.get_symbol_info(symbol_y)
+    selected_option = mt5_conn.symbol_select(symbol_y,True)
+    if selected_option is None:
+        print(f"Failed to get symbol info for {symbol_y}")
+        return
+    orders_type = [mt5_conn.ORDER_TYPE_BUY, mt5_conn.ORDER_TYPE_SELL]
+    volume = 100  # Example volume
+    iv_y = 0.25  # Example IV for symbol Y
+    iv_x = 0.20  # Example IV for symbol X
+
+    mt5_conn.place_order_vertical(symbol_y, symbol_x, orders_type, volume, iv_y, iv_x)
+
+async def get_options_names(symbol_y="BBAS3"):
     mt5_conn = MT5Connector()
     if not mt5_conn.initialize():
         print("MT5 initialization failed")
         return None, None
     symbol_y = "BBAS3"
-    spot_data = mt5_conn.get_data(symbol_y)
+    spot_data = mt5_conn.get_data(symbol_y,mt5_conn.TIMEFRAME_D1, PERIODS, 0)
     if spot_data is None:
         print("Failed to get historical data")
     else:
@@ -259,7 +282,10 @@ def get_options_names():
                print(f"Option: {option_symbol}, Bid: {bid:.2f}, Ask: {ask:.2f}, Avg: {avg_price:.2f}")
     return values, spot_data
 
+asyncio.run(test_send_order())
+
 # Example Usage
+"""
 if __name__ == "__main__":
 
     mt5_conn = MT5Connector()
@@ -308,3 +334,4 @@ if __name__ == "__main__":
     vega = bs_iv.vega(implied_vol)
 
     print(f"Implied volatility: {implied_vol:.4f}, Delta: {delta:.4f}, Vega: {vega:.4f}")
+"""

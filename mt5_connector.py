@@ -5,9 +5,13 @@ from datetime import datetime, timedelta
 import time
 import pandas as pd
 
-from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PERIODS, SHIFT_PERIODS
+from constants import CALL_OPTION, MAGIC_NUMBER, MIN_DAYS_TO_EXPIRY, PERIODS, SHIFT_PERIODS
 
 class MT5Connector:
+
+    ORDER_TYPE_BUY = mt5.ORDER_TYPE_BUY
+    ORDER_TYPE_SELL = mt5.ORDER_TYPE_SELL
+    TIMEFRAME_D1 = mt5.TIMEFRAME_D1
     
     def __init__(self):
         if not mt5.initialize():
@@ -28,50 +32,134 @@ class MT5Connector:
             return df   
 
 
-    def place_order(self,symbolY,symbolX,volumeY,volumeX,orders_type,zscore):
+    def place_order_vertical(self,symbolY,symbolX,orders_type,volume,iv_y,iv_x):
+        print(f"Placing vertical order...{symbolY}, {symbolX}, {orders_type}, {volume}, {iv_y}, {iv_x}")
 
-      # prepare the Short request
-        #volumeY, volume_X = calculate_volumes(symbolY,symbolX,slope,min_lot_Y,min_lot_X,available_margin,total_positions)
+        
+        # Enable symbols in Market Watch
+        if not mt5.symbol_select(symbolY, True):
+            print(f"Failed to select symbol {symbolY}")
+            return
+        
+        if not mt5.symbol_select(symbolX, True):
+            print(f"Failed to select symbol {symbolX}")
+            return
+        
+        # Get symbol info
+        symbol_info_y = mt5.symbol_info(symbolY)
+        symbol_info_x = mt5.symbol_info(symbolX)
+        
+        if symbol_info_y is None:
+            print(f"Symbol {symbolY} not found")
+            return
+        
+        if symbol_info_x is None:
+            print(f"Symbol {symbolX} not found")
+            return
+
+        print(f"Symbol info X: Ask={symbol_info_x.ask}, Bid={symbol_info_x.bid}, Min={symbol_info_x.volume_min}, Max={symbol_info_x.volume_max}")
+
+        
+        # Get the filling mode supported by the symbol
+        filling_type_y = symbol_info_y.filling_mode
+        filling_type_x = symbol_info_x.filling_mode
+        
+        # Determine appropriate filling mode for symbol Y
+        if filling_type_y & 2:  # FOK is supported
+            type_filling_y = mt5.ORDER_FILLING_FOK
+        elif filling_type_y & 1:  # IOC is supported
+            type_filling_y = mt5.ORDER_FILLING_IOC
+        else:  # Return is supported
+            type_filling_y = mt5.ORDER_FILLING_RETURN
+        
+        # Determine appropriate filling mode for symbol X
+        if filling_type_x & 1:  # IOC is supported
+            type_filling_x = mt5.ORDER_FILLING_IOC
+        elif filling_type_x & 4:  # Return is supported
+            type_filling_x = mt5.ORDER_FILLING_RETURN
+        else:  # FOK is supported
+            type_filling_x = mt5.ORDER_FILLING_FOK
+        
+        print(f"Placing orders for symbols {symbolY} and {symbolX} and order type {orders_type[0]} and order type {orders_type[1]} respectively")
+        volume = symbol_info_y.volume_min
+        # Prepare the first request (Y symbol)
         request_y = {
            "action": mt5.TRADE_ACTION_DEAL,
            "symbol": symbolY,
-           "volume": volumeY,
+           "volume": volume,
            "type": orders_type[0],
-           "zscore": mt5.symbol_info_tick(symbolY).bid,
+           "price": symbol_info_y.ask,
            "sl": 0.0,
            "tp": 0.0,
            "deviation": 10,
            "magic": MAGIC_NUMBER,
-           "comment": "y,{:.2f}".format(zscore),
+           "comment": "y,{:.2f}".format(iv_y),
            "type_time": mt5.ORDER_TIME_GTC,
-           "type_filling": mt5.ORDER_FILLING_IOC,
+           "type_filling": type_filling_y,
         }
-        result_y_check = mt5.order_check(request_y)
-        print("Resultado do short check order (dependente) ", result_y_check)       
         
-        # prepare the Long request
-        point=mt5.symbol_info(symbolX).point
+        result_y_check = mt5.order_check(request_y)
+
+        if result_y_check is None:
+            print(f"order_check failed for {symbolY}, error: {mt5.last_error()}")
+            return
+        else:
+            print(f"Order check Y result: retcode={result_y_check.retcode}, comment={result_y_check.comment}")
+            # retcode 0 means check passed successfully
+            if result_y_check.retcode != 0:
+                print(f"Order check Y failed: retcode={result_y_check.retcode}, {result_y_check.comment}")
+                return
+
+        # Prepare the second request (X symbol)
         request_x = {
            "action": mt5.TRADE_ACTION_DEAL,
            "symbol": symbolX,
-           "volume": volumeX,
+           "volume": volume,
            "type": orders_type[1],
-           "zscore": mt5.symbol_info_tick(symbolX).ask,
+           "price": symbol_info_x.bid,
            "sl": 0.0,
            "tp": 0.0,
            "deviation": 10,
            "magic": MAGIC_NUMBER,
-           "comment": "x,{:.2f}".format(zscore),
+           "comment": "x,{:.2f}".format(iv_x),
            "type_time": mt5.ORDER_TIME_GTC,
-           "type_filling": mt5.ORDER_FILLING_IOC,
+           "type_filling": type_filling_x,
         }
+        
         result_x_order_check = mt5.order_check(request_x)
-        print("Resultado do long check order (independente) ", result_x_order_check)
 
+        if result_x_order_check is None:
+            print(f"order_check failed for {symbolX}, error: {mt5.last_error()}")
+            return
+        else:
+            print(f"Order check X result: retcode={result_x_order_check.retcode}, comment={result_x_order_check.comment}")
+            # retcode 0 means check passed successfully
+            if result_x_order_check.retcode != 0:
+                print(f"Order check X failed: retcode={result_x_order_check.retcode}, {result_x_order_check.comment}")
+                return
+
+        # Both checks passed (retcode == 0), now send orders
+        print("Both order checks passed, sending orders...")
         result_y_order = mt5.order_send(request_y)
         result_x_order = mt5.order_send(request_x)
-        print("Resultado do short (dependente) ", result_y_order)
-        print("Resultado do long (independente) ", result_x_order) 
+
+        if result_y_order is None:
+            print(f"Order send Y failed, error: {mt5.last_error()}")
+        else:
+            print(f"Order send Y result: retcode={result_y_order.retcode}, comment={result_y_order.comment}")
+            if result_y_order.retcode == mt5.TRADE_RETCODE_DONE:
+                print(f"Order Y executed successfully! Order: {result_y_order.order}, Deal: {result_y_order.deal}")
+            else:
+                print(f"Order Y failed: {result_y_order.comment}")
+
+        if result_x_order is None:
+            print(f"Order send X failed, error: {mt5.last_error()}")
+        else:
+            print(f"Order send X result: retcode={result_x_order.retcode}, comment={result_x_order.comment}")
+            if result_x_order.retcode == mt5.TRADE_RETCODE_DONE:
+                print(f"Order X executed successfully! Order: {result_x_order.order}, Deal: {result_x_order.deal}")
+            else:
+                print(f"Order X failed: {result_x_order.comment}")
     
     def close_all_positions(self):
         # Get all open positions
