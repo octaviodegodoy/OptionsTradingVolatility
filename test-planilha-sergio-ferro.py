@@ -291,6 +291,9 @@ if __name__ == "__main__":
 
         print("Asset BBAS3 ")
 
+        positions = mt5_conn.get_open_positions()
+        print(f"Total open positions: {len(positions)}")
+
         black_scholes_calculator = BlackScholesCalculator()
 
         T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
@@ -381,22 +384,36 @@ if __name__ == "__main__":
 
             
             positions = mt5_conn.get_open_positions()
+            print(f"Total open positions: {len(positions)}")
             asset_symbol = "BBAS3"
+            
             for pos in positions:
                 print(f"Analyzing position: {pos.symbol}")
-                option_market_price = pos.price_open
-                asset_market_price = pos.price_open
-                T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
-                r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
-                factor = (r/100+1)**((-T)/252)
+                option_bid_price = mt5_conn.get_symbol_info(pos.symbol).bid
+                option_ask_price = mt5_conn.get_symbol_info(pos.symbol).ask
+                option_market_price = (option_bid_price + option_ask_price)/2 
+                
+                
+                asset_bid_price = mt5_conn.get_symbol_info(asset_symbol).bid
+                asset_ask_price = mt5_conn.get_symbol_info(asset_symbol).ask
+                asset_market_price = (asset_bid_price + asset_ask_price)/2
+
                 symbol_info = mt5_conn.get_symbol_info(pos.symbol)
+                
+                position_expiration_time = symbol_info.expiration_time
+                print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(position_expiration_time)}")
+                r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(position_expiration_time, unit='s'))
+                total_days_left = (position_expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
+
+                t = count_weekdays(datetime.fromtimestamp(time_now), int(total_days_left))
+                factor = (r/100+1)**((-t)/252)
+                F = asset_market_price / factor
+
                 K = symbol_info.option_strike
                 option_type = symbol_info.option_right  # 0 for call, 1 for put
-                asset_symbol_info = mt5_conn.get_symbol_info(asset_symbol)              
-                asset_market_price = (asset_symbol_info.bid + asset_symbol_info.ask)/2  
-                iv = black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, option_type)
-                delta = black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
-                print(f"Position: {pos.symbol}, Delta: {delta:.2f}")
+                iv = black_scholes_calculator.fx_vol(F, K, t, option_market_price, factor, option_type)
+                delta = black_scholes_calculator.fx_delta(F, K, t, iv, factor, option_type, asset_market_price)
+                print(f"Position: {pos.symbol}, Delta: {delta:.2f} position type {pos.type} volume {pos.volume} open price {pos.price_open}")
                 time.sleep(5)
             print(f"Total open positions: {len(positions)}")
             
