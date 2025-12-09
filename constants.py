@@ -7,3 +7,5 @@ PUT_OPTION = 1
 MIN_DAYS_TO_EXPIRY = 60*60*24*12 # 12 days in seconds
 UNIX_DAYS_IN_SECONDS = 60*60*24
 STRIKE_PRICE_OFFSET = 0.05 # 5% above and below current price
+TYPE_BUY = 0
+TYPE_SELL = 1

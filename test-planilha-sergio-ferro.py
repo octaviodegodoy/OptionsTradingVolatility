@@ -4,7 +4,7 @@ from datetime import datetime
 import time
 from scipy.stats import norm
 from scipy.optimize import newton, brentq
-from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PUT_OPTION, STRIKE_PRICE_OFFSET, UNIX_DAYS_IN_SECONDS
+from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PUT_OPTION, STRIKE_PRICE_OFFSET, TYPE_BUY, UNIX_DAYS_IN_SECONDS
 from functions.quant_functions import QuantCalculation
 from mt5_connector import MT5Connector
 from functions.original_spline import c_spline
@@ -386,6 +386,8 @@ if __name__ == "__main__":
             positions = mt5_conn.get_open_positions()
             print(f"Total open positions: {len(positions)}")
             asset_symbol = "BBAS3"
+            sum_delta_calls = 0.0
+            call_buy_strike = None
             
             for pos in positions:
                 print(f"Analyzing position: {pos.symbol}")
@@ -413,9 +415,41 @@ if __name__ == "__main__":
                 option_type = symbol_info.option_right  # 0 for call, 1 for put
                 iv = black_scholes_calculator.fx_vol(F, K, t, option_market_price, factor, option_type)
                 delta = black_scholes_calculator.fx_delta(F, K, t, iv, factor, option_type, asset_market_price)
+                delta = round(delta, 2) if pos.type == 0 else round(-delta, 2)
+                call_buy_strike = K if pos.type == TYPE_BUY else None
+                if option_type == CALL_OPTION:
+                    sum_delta_calls += delta * pos.volume
                 print(f"Position: {pos.symbol}, Delta: {delta:.2f} position type {pos.type} volume {pos.volume} open price {pos.price_open}")
-                time.sleep(5)
-            print(f"Total open positions: {len(positions)}")
+                time.sleep(1)
+            
+            
+            
+            print(f"Get delta from put option strike {call_buy_strike}")
+            put_option_name = mt5_conn.get_option_name_by_strike("BBAS*", call_buy_strike, PUT_OPTION, position_expiration_time)
+            print(f"Put option strike found {put_option_name}")
+            # calculate put option IV and delta
+            put_option_info = mt5_conn.get_symbol_info(put_option_name)
+            selected = mt5_conn.symbol_select(put_option_name,True)
+            if not selected: 
+                print(f"Failed to select option {put_option_name}")
+            else:
+                put_option_info = mt5_conn.get_symbol_info(put_option_name)
+                put_bid_option_price = put_option_info.bid
+                put_ask_option_price = put_option_info.ask
+                print(f"Put Bid {put_bid_option_price}  Put Ask {put_ask_option_price}")
+                put_option_market_price = (put_bid_option_price + put_ask_option_price)/2
+                K_put = put_option_info.option_strike
+                option_type_put = put_option_info.option_right  # 0 for call, 1
+                iv_put = black_scholes_calculator.fx_vol(F, K_put, t, put_option_market_price, factor, option_type_put)
+                delta_put = black_scholes_calculator.fx_delta(F, K_put, t, iv_put, factor, option_type_put, asset_market_price)
+                delta_put = round(delta_put, 2)
+                put_delta_ratio = sum_delta_calls / delta_put if delta_put != 0 else None
+                hedge_volume = round(abs(put_delta_ratio) / 100) * 100
+                print(f"Total open positions: {len(positions)} sum delta call {abs(sum_delta_calls):.2f} delta put is {delta_put:.2f} expected delta puts to hedge {-put_delta_ratio:.2f} rounded to {-hedge_volume}")
+
+
+
+ 
             
         else:
             print(f"Call Deltas: {list(call_deltas_dict.keys())}")

@@ -245,7 +245,12 @@ class MT5Connector:
         sorted_options_names = sorted(options_names)
         return sorted_options_names
            
-            
+    def get_option_name_by_strike(self,group_name,strike_price,option_type,expiration_time):
+        options_symbols = mt5.symbols_get(group_name)
+        for s in options_symbols:
+            if s.option_right in [option_type] and s.option_strike == strike_price and s.expiration_time == expiration_time:
+               return s.name
+        return None        
     
     def total_daily_risk(self):
         from_date = datetime.now() - timedelta(hours=12,minutes=0)
