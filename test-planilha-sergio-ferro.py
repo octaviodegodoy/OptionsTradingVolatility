@@ -1,10 +1,11 @@
 from ast import If
 from math import log
 from datetime import datetime
+import math
 import time
 from scipy.stats import norm
 from scipy.optimize import newton, brentq
-from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PUT_OPTION, STRIKE_PRICE_OFFSET, TYPE_BUY, UNIX_DAYS_IN_SECONDS
+from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PUT_OPTION, STRIKE_PRICE_OFFSET, TYPE_BUY, TYPE_SELL, UNIX_DAYS_IN_SECONDS
 from functions.quant_functions import QuantCalculation
 from mt5_connector import MT5Connector
 from functions.original_spline import c_spline
@@ -173,6 +174,15 @@ class BlackScholesCalculator:
         elif ID == PUT_OPTION:
             return self.fx_put_vol(F, K, T, price, r)
         
+    def fx_gamma(self,F, S, T, sigma, r):
+        
+        x = self.d_1(F, K, T, sigma)
+        Pi = math.pi
+        a = (1 / (2 * Pi) ** 0.5) * np.exp(-x ** 2 / 2)
+        fx_gamma = a * r * F / (S * sigma * (T / 252) ** (1 / 2))
+        
+        return fx_gamma
+        
         # Helper function to get interpolated rate for any future date
     def get_interpolated_rate(self, target_date):
         """Get interpolated interest rate for a specific date"""
@@ -244,245 +254,260 @@ def selection_condition(option_info, asset_market_price):
     if bid_option_price == 0.0 or ask_option_price == 0.0 or asset_market_price > K * (1 + STRIKE_PRICE_OFFSET) or asset_market_price < K * (1 - STRIKE_PRICE_OFFSET):
         return False                
     return True
-        
-
-
     
 
 if __name__ == "__main__":
 
     mt5_conn = MT5Connector()
-    
-    symbol_info = mt5_conn.get_symbol_info("BBAS3")
-    selected=mt5_conn.symbol_select("BBAS3",True) 
-    if not selected: 
-        print("Failed to select BBAS3") 
-        mt5_conn.shutdown() 
-        quit() 
-        mt5_conn.symbol_select("BBAS3",True)
 
-    while selected:
+    positions = mt5_conn.get_open_positions()
+    print(f"Total open positions: {len(positions)}")
+    black_scholes_calculator = BlackScholesCalculator()
+    asset_symbol = "BBAS3"
+    time_now = int(time.time())
 
-        bid_market_price = symbol_info.bid
-        ask_market_price = symbol_info.ask
-        asset_market_price = (bid_market_price + ask_market_price)/2       
+    if len(positions) > 0:
+        sum_delta_calls = 0.0
+        sum_delta_puts = 0.0
+        call_buy_strike = None
 
-        print(f"Minimum time to expiration for BBAS* options {MIN_DAYS_TO_EXPIRY} seconds")
-
-        time_now = int(time.time())
-        minimum_exp_time = time_now + MIN_DAYS_TO_EXPIRY
-
-        chain_options = mt5_conn.get_option_names_by_expiration_time("BBAS*")
-
-        print(f"Names for the options after 10 days {chain_options[list(chain_options.keys())[0]]}")
-        print(f"Minimum Expiration Time : {minimum_exp_time}")
-
-        options_names_list = chain_options[list(chain_options.keys())[0]]
-        expiration_time = list(chain_options.keys())[0]
-        print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(expiration_time)}")
-        total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
-        print(f"T days : {total_days}")
-        quant_calc = QuantCalculation()
-        spot_prices_data = mt5_conn.get_data("BBAS3", mt5_conn.get_mt5_connector().TIMEFRAME_D1, 100, 0)["close"].values
-        garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
-        print(f"GARCH Volatility : {garch_vol:.2f}%")
-
-        print(f"Asset Market Price : {asset_market_price:.2f}")   
-
-        print("Asset BBAS3 ")
-
-        positions = mt5_conn.get_open_positions()
-        print(f"Total open positions: {len(positions)}")
-
-        black_scholes_calculator = BlackScholesCalculator()
-
-        T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
-
-        # expiration_time is a Unix timestamp (seconds); convert to pandas Timestamp for interpolation
-        r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
-        print(f"Futures Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
-        factor = (r/100+1)**((-T)/252)
-        print(f"Factor : {factor}")
-        F = asset_market_price / factor
-        print(f"Fut DI Price : {F:.2f}")
-        call_deltas_dict = {}
-        put_deltas_dict = {}  # Dictionary to store {delta: iv}
-        call_deltas_list = []
-        call_iv_list = []
-        put_deltas_list = []
-        for option_name in options_names_list:
-            option_info = mt5_conn.get_symbol_info(option_name)
-            selected_option = mt5_conn.symbol_select(option_name,True)
-
-            if not selected_option: 
-                print(f"Failed to select option {option_name}") 
-            else:
-                option_info = mt5_conn.get_symbol_info(option_name)
-
-                if option_info is None:
-                    print(f"Failed to get info for option {option_name}")
-                    continue
-                if not selection_condition(option_info, asset_market_price):
-                    #print(f"Option {option_name} has no market data (bid and ask are zero). Skipping.")
-                    continue                
+        for pos in positions:
             
-                bid_option_price = option_info.bid
-                ask_option_price = option_info.ask
-                option_market_price = (bid_option_price + ask_option_price)/2
-                K = option_info.option_strike
-                option_type = option_info.option_right  # 0 for call, 1 for put
-                    
-                # Calculate implied volatility
-                iv_call_brentq = black_scholes_calculator.implied_vol(F, K, T, option_market_price, factor, option_type)
-                print(f"Option {option_name} IV {iv_call_brentq}")
-                iv = black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, option_type)
-                delta = black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
-                delta = round(delta, 2)
-                option_type_str = "Call" if option_type == CALL_OPTION else "Put"
-                iv = iv * 100  # Convert to percentage
-                diff_vol = garch_vol - iv
-                print(f"GARCH - IV for option {option_name} is {garch_vol:.2f}% : {iv:.2f}% diff is {diff_vol:.2f}% delta {delta:.2f}")
-
-                if option_type == CALL_OPTION:
-                    call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name}
-                elif option_type == PUT_OPTION:
-                    put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name}
-
-
-        if call_deltas_dict:
-            deltas = list(call_deltas_dict.keys())
-            avg_call_delta = sum(deltas) / len(deltas)
-            std_call_delta = (sum((x - avg_call_delta) ** 2 for x in deltas) / len(deltas)) ** 0.5
+            option_bid_price = mt5_conn.get_symbol_info(pos.symbol).bid
+            option_ask_price = mt5_conn.get_symbol_info(pos.symbol).ask
+            option_market_price = (option_bid_price + option_ask_price)/2 
+            print(f"Analyzing position: {pos.symbol} Type: {pos.type} Volume: {pos.volume} current ask {option_ask_price} current bid {option_bid_price} market price {option_market_price} ")
             
-            # Find closest deltas to ±1 std from mean
-            lower_bound = avg_call_delta - std_call_delta
-            upper_bound = avg_call_delta + std_call_delta
-            closest_lower = min([d for d in deltas if d > 0.25], key=lambda x: abs(x - lower_bound), default=None)
-            closest_upper = min([d for d in deltas if d < 0.75], key=lambda x: abs(x - upper_bound), default=None)
-            
-            # Calculate IV difference
-            if closest_lower is not None and closest_upper is not None:
-                iv_diff = call_deltas_dict[closest_upper]['iv'] - call_deltas_dict[closest_lower]['iv']
-                call_delta_diff = closest_upper - closest_lower
-            else:
-                iv_diff = None
+            asset_bid_price = mt5_conn.get_symbol_info(asset_symbol).bid
+            asset_ask_price = mt5_conn.get_symbol_info(asset_symbol).ask
+            asset_market_price = (asset_bid_price + asset_ask_price)/2
 
-         
-            print(f"Call Deltas: {deltas}")
-            print(f"Average Call Delta: {avg_call_delta:.2f} ± {std_call_delta:.2f} delta diff {call_delta_diff:.2f}")
-            print(f"Closest existing deltas: Lower={closest_lower:.2f} option name {call_deltas_dict[closest_lower]['option_name']} with (IV={call_deltas_dict[closest_lower]['iv']:.2f}%), Upper={closest_upper:.2f} and option name {call_deltas_dict[closest_upper]['option_name']}  with (IV={call_deltas_dict[closest_upper]['iv']:.2f}%) diff IV={iv_diff:.2f}%" if iv_diff is not None else "N/A  (IV difference)")
-
+            symbol_info = mt5_conn.get_symbol_info(pos.symbol)
             
-            call_buy = call_deltas_dict[closest_upper]['option_name']
-            call_sell = call_deltas_dict[closest_lower]['option_name']
-            orders_type = [mt5_conn.ORDER_TYPE_SELL, mt5_conn.ORDER_TYPE_BUY] # or "SELL"
-            iv_y = call_deltas_dict[closest_upper]['iv']
-            iv_x = call_deltas_dict[closest_lower]['iv']
-            if iv_diff is not None and iv_diff < 0.005:
-                 print(f"Placing vertical spread order for call options: Buy {call_buy}, Sell {call_sell}, IV difference {iv_diff:.2f}%")
-                 mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, 100, iv_y, iv_x)
+            position_expiration_time = symbol_info.expiration_time
+            print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(position_expiration_time)}")
+            r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(position_expiration_time, unit='s'))
+            total_days_left = (position_expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
 
+            t = count_weekdays(datetime.fromtimestamp(time_now), int(total_days_left))
+            factor = (r/100+1)**((-t)/252)
+            F = asset_market_price / factor
+
+            K = symbol_info.option_strike
+            option_type = symbol_info.option_right  # 0 for call, 1 for put
+            iv = black_scholes_calculator.fx_vol(F, K, t, option_market_price, factor, option_type)
+            delta = black_scholes_calculator.fx_delta(F, K, t, iv, factor, option_type, asset_market_price)
+            print(f"Calculated delta {delta:.2f}")
             
+            call_buy_strike = K if pos.type == TYPE_BUY else None
+            if option_type == CALL_OPTION:
+                if pos.type == TYPE_BUY:                    
+                    sum_delta_calls += delta * pos.volume
+                    print(f"Long Call Position found: {pos.symbol} Strike {K} Volume {pos.volume} sum delta calls {sum_delta_calls:.2f}")
+                elif pos.type == TYPE_SELL:
+                    sum_delta_calls -= delta * pos.volume
+                    print(f"Short Call Position found: {pos.symbol} Strike {K} Volume {pos.volume} sum delta calls {sum_delta_calls:.2f}")
+                            
+            print(f"Position: {pos.symbol}, Delta: {delta:.2f} position type {pos.type} volume {pos.volume} open price {pos.price_open}")
+            if option_type == PUT_OPTION:
+                if pos.type == TYPE_BUY:                    
+                    sum_delta_puts -= delta * pos.volume
+                    print(f"Long Put Position found: {pos.symbol} Strike {K} Volume {pos.volume} sum delta puts {sum_delta_puts:.2f}")
+                elif pos.type == TYPE_SELL:
+                    sum_delta_puts += delta * pos.volume
+                    print(f"Short Put Position found: {pos.symbol} Strike {K} Volume {pos.volume} sum delta puts {sum_delta_puts:.2f}")
+            
+            time.sleep(1)
+
+
+
+        print(f"Get delta from put option strike {call_buy_strike}")
+        put_option_name = mt5_conn.get_option_name_by_strike("BBAS*", call_buy_strike, PUT_OPTION, position_expiration_time)
+        print(f"Put option strike found {put_option_name}")
+        # calculate put option IV and delta
+        put_option_info = mt5_conn.get_symbol_info(put_option_name)
+        selected = mt5_conn.symbol_select(put_option_name,True)
+        if not selected: 
+            print(f"Failed to select option {put_option_name}")
+        else:
+            put_option_info = mt5_conn.get_symbol_info(put_option_name)
+            put_bid_option_price = put_option_info.bid
+            put_ask_option_price = put_option_info.ask
+            print(f"Put Bid {put_bid_option_price}  Put Ask {put_ask_option_price}")
+            put_option_market_price = (put_bid_option_price + put_ask_option_price)/2
+            K_put = put_option_info.option_strike
+            option_type_put = put_option_info.option_right  # 0 for call, 1
+            iv_put = black_scholes_calculator.fx_vol(F, K_put, t, put_option_market_price, factor, option_type_put)
+            delta_put = black_scholes_calculator.fx_delta(F, K_put, t, iv_put, factor, option_type_put, asset_market_price)
+            gamma_put = black_scholes_calculator.fx_gamma(F, asset_market_price, t, iv_put, factor)
+            print(f"Put option {put_option_name} IV {iv_put*100:.2f}% Delta {delta_put:.2f} Gamma {gamma_put:.6f}")
+            delta_put = round(delta_put, 2)
+            put_delta_ratio = sum_delta_calls / delta_put if delta_put != 0 else None
+            hedge_volume = round(abs(put_delta_ratio) / 100) * 100
+            print(f"Total open positions: {len(positions)} sum delta call {sum_delta_calls:.2f} sum delta puts is {sum_delta_puts:.2f} delta put is {delta_put:.2f} expected delta puts to hedge {-put_delta_ratio:.2f} rounded to {-hedge_volume}")
+
+    elif len(positions) == 0:
+        symbol_info = mt5_conn.get_symbol_info("BBAS3")
+        selected=mt5_conn.symbol_select("BBAS3",True) 
+        if not selected: 
+            print("Failed to select BBAS3") 
+            mt5_conn.shutdown() 
+            quit() 
+            mt5_conn.symbol_select("BBAS3",True)
+
+        while True:
+
+            bid_market_price = symbol_info.bid
+            ask_market_price = symbol_info.ask
+            asset_market_price = (bid_market_price + ask_market_price)/2       
+
+            print(f"Minimum time to expiration for BBAS* options {MIN_DAYS_TO_EXPIRY} seconds")
+
+            minimum_exp_time = time_now + MIN_DAYS_TO_EXPIRY
+
+            chain_options = mt5_conn.get_option_names_by_expiration_time("BBAS*")
+
+            print(f"Names for the options after 10 days {chain_options[list(chain_options.keys())[0]]}")
+            print(f"Minimum Expiration Time : {minimum_exp_time}")
+
+            options_names_list = chain_options[list(chain_options.keys())[0]]
+            expiration_time = list(chain_options.keys())[0]
+            print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(expiration_time)}")
+            total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
+            print(f"T days : {total_days}")
+            quant_calc = QuantCalculation()
+            spot_prices_data = mt5_conn.get_data("BBAS3", mt5_conn.get_mt5_connector().TIMEFRAME_D1, 100, 0)["close"].values
+            garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
+            print(f"GARCH Volatility : {garch_vol:.2f}%")
+
+            print(f"Asset Market Price : {asset_market_price:.2f}")   
+
+            print("Asset BBAS3 ")
+
             positions = mt5_conn.get_open_positions()
             print(f"Total open positions: {len(positions)}")
-            asset_symbol = "BBAS3"
-            sum_delta_calls = 0.0
-            call_buy_strike = None
-            
-            for pos in positions:
-                print(f"Analyzing position: {pos.symbol}")
-                option_bid_price = mt5_conn.get_symbol_info(pos.symbol).bid
-                option_ask_price = mt5_conn.get_symbol_info(pos.symbol).ask
-                option_market_price = (option_bid_price + option_ask_price)/2 
-                
-                
-                asset_bid_price = mt5_conn.get_symbol_info(asset_symbol).bid
-                asset_ask_price = mt5_conn.get_symbol_info(asset_symbol).ask
-                asset_market_price = (asset_bid_price + asset_ask_price)/2
 
-                symbol_info = mt5_conn.get_symbol_info(pos.symbol)
+            T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
+
+            # expiration_time is a Unix timestamp (seconds); convert to pandas Timestamp for interpolation
+            r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
+            print(f"Futures Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
+            factor = (r/100+1)**((-T)/252)
+            print(f"Factor : {factor}")
+            F = asset_market_price / factor
+            print(f"Fut DI Price : {F:.2f}")
+            call_deltas_dict = {}
+            put_deltas_dict = {}  # Dictionary to store {delta: iv}
+            call_deltas_list = []
+            call_iv_list = []
+            put_deltas_list = []
+            for option_name in options_names_list:
+                option_info = mt5_conn.get_symbol_info(option_name)
+                selected_option = mt5_conn.symbol_select(option_name,True)
+
+                if not selected_option: 
+                    print(f"Failed to select option {option_name}") 
+                else:
+                    option_info = mt5_conn.get_symbol_info(option_name)
+
+                    if option_info is None:
+                        print(f"Failed to get info for option {option_name}")
+                        continue
+                    if not selection_condition(option_info, asset_market_price):
+                        #print(f"Option {option_name} has no market data (bid and ask are zero). Skipping.")
+                        continue                
                 
-                position_expiration_time = symbol_info.expiration_time
-                print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(position_expiration_time)}")
-                r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(position_expiration_time, unit='s'))
-                total_days_left = (position_expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
+                    bid_option_price = option_info.bid
+                    ask_option_price = option_info.ask
+                    option_market_price = (bid_option_price + ask_option_price)/2
+                    K = option_info.option_strike
+                    option_type = option_info.option_right  # 0 for call, 1 for put
+                        
+                    # Calculate implied volatility
+                    iv_call_brentq = black_scholes_calculator.implied_vol(F, K, T, option_market_price, factor, option_type)
+                    print(f"Option {option_name} IV {iv_call_brentq}")
+                    iv = black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, option_type)
+                    delta = black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
+                    delta = round(delta, 2)
+                    option_type_str = "Call" if option_type == CALL_OPTION else "Put"
+                    iv = iv * 100  # Convert to percentage
+                    diff_vol = garch_vol - iv
+                    print(f"GARCH - IV for option {option_name} is {garch_vol:.2f}% : {iv:.2f}% diff is {diff_vol:.2f}% delta {delta:.2f}")
 
-                t = count_weekdays(datetime.fromtimestamp(time_now), int(total_days_left))
-                factor = (r/100+1)**((-t)/252)
-                F = asset_market_price / factor
+                    if option_type == CALL_OPTION:
+                        call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name}
+                    elif option_type == PUT_OPTION:
+                        put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name}
 
-                K = symbol_info.option_strike
-                option_type = symbol_info.option_right  # 0 for call, 1 for put
-                iv = black_scholes_calculator.fx_vol(F, K, t, option_market_price, factor, option_type)
-                delta = black_scholes_calculator.fx_delta(F, K, t, iv, factor, option_type, asset_market_price)
-                delta = round(delta, 2) if pos.type == 0 else round(-delta, 2)
-                call_buy_strike = K if pos.type == TYPE_BUY else None
-                if option_type == CALL_OPTION:
-                    sum_delta_calls += delta * pos.volume
-                print(f"Position: {pos.symbol}, Delta: {delta:.2f} position type {pos.type} volume {pos.volume} open price {pos.price_open}")
-                time.sleep(1)
+
+            if call_deltas_dict:
+                deltas = list(call_deltas_dict.keys())
+                avg_call_delta = sum(deltas) / len(deltas)
+                std_call_delta = (sum((x - avg_call_delta) ** 2 for x in deltas) / len(deltas)) ** 0.5
+                
+                # Find closest deltas to ±1 std from mean
+                lower_bound = avg_call_delta - std_call_delta
+                upper_bound = avg_call_delta + std_call_delta
+                closest_lower = min([d for d in deltas if d > 0.25], key=lambda x: abs(x - lower_bound), default=None)
+                closest_upper = min([d for d in deltas if d < 0.75], key=lambda x: abs(x - upper_bound), default=None)
+                
+                # Calculate IV difference
+                if closest_lower is not None and closest_upper is not None:
+                    iv_diff = call_deltas_dict[closest_upper]['iv'] - call_deltas_dict[closest_lower]['iv']
+                    call_delta_diff = closest_upper - closest_lower
+                else:
+                    iv_diff = None
+
             
-            
-            
-            print(f"Get delta from put option strike {call_buy_strike}")
-            put_option_name = mt5_conn.get_option_name_by_strike("BBAS*", call_buy_strike, PUT_OPTION, position_expiration_time)
-            print(f"Put option strike found {put_option_name}")
-            # calculate put option IV and delta
-            put_option_info = mt5_conn.get_symbol_info(put_option_name)
-            selected = mt5_conn.symbol_select(put_option_name,True)
-            if not selected: 
-                print(f"Failed to select option {put_option_name}")
+                print(f"Call Deltas: {deltas}")
+                print(f"Average Call Delta: {avg_call_delta:.2f} ± {std_call_delta:.2f} delta diff {call_delta_diff:.2f}")
+                print(f"Closest existing deltas: Lower={closest_lower:.2f} option name {call_deltas_dict[closest_lower]['option_name']} with (IV={call_deltas_dict[closest_lower]['iv']:.2f}%), Upper={closest_upper:.2f} and option name {call_deltas_dict[closest_upper]['option_name']}  with (IV={call_deltas_dict[closest_upper]['iv']:.2f}%) diff IV={iv_diff:.2f}%" if iv_diff is not None else "N/A  (IV difference)")
+
+                
+                call_buy = call_deltas_dict[closest_upper]['option_name']
+                call_sell = call_deltas_dict[closest_lower]['option_name']
+                orders_type = [mt5_conn.ORDER_TYPE_BUY, mt5_conn.ORDER_TYPE_SELL] # or "SELL"
+                iv_y = call_deltas_dict[closest_upper]['iv']
+                iv_x = call_deltas_dict[closest_lower]['iv']
+                if iv_diff is not None and iv_diff < 0.005:
+                    print(f"Placing vertical spread order for call options: Buy {call_buy}, Sell {call_sell}, IV difference {iv_diff:.2f}%")
+                    mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, 100, iv_y, iv_x)
             else:
-                put_option_info = mt5_conn.get_symbol_info(put_option_name)
-                put_bid_option_price = put_option_info.bid
-                put_ask_option_price = put_option_info.ask
-                print(f"Put Bid {put_bid_option_price}  Put Ask {put_ask_option_price}")
-                put_option_market_price = (put_bid_option_price + put_ask_option_price)/2
-                K_put = put_option_info.option_strike
-                option_type_put = put_option_info.option_right  # 0 for call, 1
-                iv_put = black_scholes_calculator.fx_vol(F, K_put, t, put_option_market_price, factor, option_type_put)
-                delta_put = black_scholes_calculator.fx_delta(F, K_put, t, iv_put, factor, option_type_put, asset_market_price)
-                delta_put = round(delta_put, 2)
-                put_delta_ratio = sum_delta_calls / delta_put if delta_put != 0 else None
-                hedge_volume = round(abs(put_delta_ratio) / 100) * 100
-                print(f"Total open positions: {len(positions)} sum delta call {abs(sum_delta_calls):.2f} delta put is {delta_put:.2f} expected delta puts to hedge {-put_delta_ratio:.2f} rounded to {-hedge_volume}")
-
-
-
- 
-            
-        else:
-            print(f"Call Deltas: {list(call_deltas_dict.keys())}")
-            print("Average Call Delta: N/A (no data)")
-            
-        if put_deltas_dict:
-            deltas = list(put_deltas_dict.keys())
-            avg_put_delta = sum(deltas) / len(deltas)
-            std_put_delta = (sum((x - avg_put_delta) ** 2 for x in deltas) / len(deltas)) ** 0.5
-            
-            # Find closest deltas to ±1 std from mean
-            lower_bound = avg_put_delta - std_put_delta
-            upper_bound = avg_put_delta + std_put_delta
-            print(f" Put lower and upper bounds {lower_bound}  :   {upper_bound}")
-            closest_lower = min([d for d in deltas if -0.75 < d < -0.25], key=lambda x: abs(x - lower_bound), default=None)
-            closest_upper = min([d for d in deltas if -0.75 < d < -0.25], key=lambda x: abs(x - upper_bound), default=None)
-            print(f" lower and upper {closest_lower}  :   {closest_upper}")
-            put_delta_diff = None
-            iv_diff = None
-            # Calculate IV difference
-            if closest_lower is not None and closest_upper is not None:
-                iv_diff = put_deltas_dict[closest_upper]['iv'] - put_deltas_dict[closest_lower]['iv']
-                put_delta_diff = closest_upper - closest_lower
-            else:
+                print(f"Call Deltas: {list(call_deltas_dict.keys())}")
+                print("Average Call Delta: N/A (no data)")
+                
+            if put_deltas_dict:
+                deltas = list(put_deltas_dict.keys())
+                avg_put_delta = sum(deltas) / len(deltas)
+                std_put_delta = (sum((x - avg_put_delta) ** 2 for x in deltas) / len(deltas)) ** 0.5
+                
+                # Find closest deltas to ±1 std from mean
+                lower_bound = avg_put_delta - std_put_delta
+                upper_bound = avg_put_delta + std_put_delta
+                print(f" Put lower and upper bounds {lower_bound}  :   {upper_bound}")
+                closest_lower = min([d for d in deltas if -0.75 < d < -0.25], key=lambda x: abs(x - lower_bound), default=None)
+                closest_upper = min([d for d in deltas if -0.75 < d < -0.25], key=lambda x: abs(x - upper_bound), default=None)
+                print(f" lower and upper {closest_lower}  :   {closest_upper}")
+                put_delta_diff = None
                 iv_diff = None
-            
-            print(f"Put Deltas: {deltas}")
-            print(f"Average Put Delta: {avg_put_delta:.2f} ± {std_put_delta:.2f} delta diff {put_delta_diff:.2f}")
-            print(f"Closest existing deltas: Lower={closest_lower:.2f} option name {put_deltas_dict[closest_lower]['option_name']} with (IV={put_deltas_dict[closest_lower]['iv']:.2f}%), Upper={closest_upper:.2f} and option name {put_deltas_dict[closest_upper]['option_name']} (IV={put_deltas_dict[closest_upper]['iv']:.2f}%) diff IV={iv_diff:.2f}%" if iv_diff is not None else "N/A  (IV difference)")
-            
-        else:
-            print(f"Put Deltas: {list(put_deltas_dict.keys())}")
-            print("Average Put Delta: N/A (no data)")
+                # Calculate IV difference
+                if closest_lower is not None and closest_upper is not None:
+                    iv_diff = put_deltas_dict[closest_upper]['iv'] - put_deltas_dict[closest_lower]['iv']
+                    put_delta_diff = closest_upper - closest_lower
+                else:
+                    iv_diff = None
+                
+                print(f"Put Deltas: {deltas}")
+                print(f"Average Put Delta: {avg_put_delta:.2f} ± {std_put_delta:.2f} delta diff {put_delta_diff:.2f}")
+                print(f"Closest existing deltas: Lower={closest_lower:.2f} option name {put_deltas_dict[closest_lower]['option_name']} with (IV={put_deltas_dict[closest_lower]['iv']:.2f}%), Upper={closest_upper:.2f} and option name {put_deltas_dict[closest_upper]['option_name']} (IV={put_deltas_dict[closest_upper]['iv']:.2f}%) diff IV={iv_diff:.2f}%" if iv_diff is not None else "N/A  (IV difference)")
+                
+            else:
+                print(f"Put Deltas: {list(put_deltas_dict.keys())}")
+                print("Average Put Delta: N/A (no data)")
+
+
+
+        
 
 
         time.sleep(10)  # Wait for 60 seconds before the next iteration
