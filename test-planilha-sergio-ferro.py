@@ -263,10 +263,11 @@ if __name__ == "__main__":
     positions = mt5_conn.get_open_positions()
     print(f"Total open positions: {len(positions)}")
     black_scholes_calculator = BlackScholesCalculator()
-    asset_symbol = "BBAS3"
+    asset_symbol = "VALE3"
     time_now = int(time.time())
 
     if len(positions) > 0:
+        print("Analyzing existing positions for delta hedging...")
         sum_delta_calls = 0.0
         sum_delta_puts = 0.0
         call_buy_strike = None
@@ -297,9 +298,10 @@ if __name__ == "__main__":
             option_type = symbol_info.option_right  # 0 for call, 1 for put
             iv = black_scholes_calculator.fx_vol(F, K, t, option_market_price, factor, option_type)
             delta = black_scholes_calculator.fx_delta(F, K, t, iv, factor, option_type, asset_market_price)
-            print(f"Calculated delta {delta:.2f}")
+            print(f"Calculated delta {delta:.2f} for symbol {pos.symbol} strike {K} option type {option_type} IV {iv*100:.2f}%")
             
             call_buy_strike = K if pos.type == TYPE_BUY else None
+            print(f"Call buy strike recorded as {call_buy_strike} for position type {pos.type} but option type {option_type}")
             if option_type == CALL_OPTION:
                 if pos.type == TYPE_BUY:                    
                     sum_delta_calls += delta * pos.volume
@@ -318,7 +320,7 @@ if __name__ == "__main__":
                     print(f"Short Put Position found: {pos.symbol} Strike {K} Volume {pos.volume} sum delta puts {sum_delta_puts:.2f}")
             
             time.sleep(1)
-
+        print(f"Total sum delta calls {sum_delta_calls:.2f} total sum delta puts {sum_delta_puts:.2f}")
 
 
         print(f"Get delta from put option strike {call_buy_strike}")
@@ -344,16 +346,18 @@ if __name__ == "__main__":
             delta_put = round(delta_put, 2)
             put_delta_ratio = sum_delta_calls / delta_put if delta_put != 0 else None
             hedge_volume = round(abs(put_delta_ratio) / 100) * 100
+            put_call_delta_diff = sum_delta_calls - sum_delta_puts
+            print(f"CALL PUT delta diff is {put_call_delta_diff:.2f} ")
             print(f"Total open positions: {len(positions)} sum delta call {sum_delta_calls:.2f} sum delta puts is {sum_delta_puts:.2f} delta put is {delta_put:.2f} expected delta puts to hedge {-put_delta_ratio:.2f} rounded to {-hedge_volume}")
 
     elif len(positions) == 0:
-        symbol_info = mt5_conn.get_symbol_info("BBAS3")
-        selected=mt5_conn.symbol_select("BBAS3",True) 
+        symbol_info = mt5_conn.get_symbol_info("VALE3")
+        selected=mt5_conn.symbol_select("VALE3",True) 
         if not selected: 
-            print("Failed to select BBAS3") 
+            print("Failed to select VALE3") 
             mt5_conn.shutdown() 
             quit() 
-            mt5_conn.symbol_select("BBAS3",True)
+            mt5_conn.symbol_select("VALE3",True)
 
         while True:
 
@@ -361,28 +365,28 @@ if __name__ == "__main__":
             ask_market_price = symbol_info.ask
             asset_market_price = (bid_market_price + ask_market_price)/2       
 
-            print(f"Minimum time to expiration for BBAS* options {MIN_DAYS_TO_EXPIRY} seconds")
+            print(f"Minimum time to expiration for VALE* options {MIN_DAYS_TO_EXPIRY} seconds")
 
             minimum_exp_time = time_now + MIN_DAYS_TO_EXPIRY
 
-            chain_options = mt5_conn.get_option_names_by_expiration_time("BBAS*")
+            chain_options = mt5_conn.get_option_names_by_expiration_time("VALE*")
 
             print(f"Names for the options after 10 days {chain_options[list(chain_options.keys())[0]]}")
             print(f"Minimum Expiration Time : {minimum_exp_time}")
 
             options_names_list = chain_options[list(chain_options.keys())[0]]
             expiration_time = list(chain_options.keys())[0]
-            print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(expiration_time)}")
+            print(f"Listing options from the selected expiration time: {expiration_time}")
             total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
             print(f"T days : {total_days}")
             quant_calc = QuantCalculation()
-            spot_prices_data = mt5_conn.get_data("BBAS3", mt5_conn.get_mt5_connector().TIMEFRAME_D1, 100, 0)["close"].values
+            spot_prices_data = mt5_conn.get_data("VALE3", mt5_conn.get_mt5_connector().TIMEFRAME_D1, 100, 0)["close"].values
             garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
             print(f"GARCH Volatility : {garch_vol:.2f}%")
 
             print(f"Asset Market Price : {asset_market_price:.2f}")   
 
-            print("Asset BBAS3 ")
+            print("Asset VALE3 Market Price : Calculating...")
 
             positions = mt5_conn.get_open_positions()
             print(f"Total open positions: {len(positions)}")
@@ -469,9 +473,10 @@ if __name__ == "__main__":
                 orders_type = [mt5_conn.ORDER_TYPE_BUY, mt5_conn.ORDER_TYPE_SELL] # or "SELL"
                 iv_y = call_deltas_dict[closest_upper]['iv']
                 iv_x = call_deltas_dict[closest_lower]['iv']
-                if iv_diff is not None and iv_diff < 0.005:
+                print(f"Preparing to place vertical spread iv diff is {iv_diff}, and {0.3} is the minimum")
+                if iv_diff is not None and iv_diff < 0.01:
                     print(f"Placing vertical spread order for call options: Buy {call_buy}, Sell {call_sell}, IV difference {iv_diff:.2f}%")
-                    mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, 100, iv_y, iv_x)
+                    mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, 1000.0, iv_y, iv_x)
             else:
                 print(f"Call Deltas: {list(call_deltas_dict.keys())}")
                 print("Average Call Delta: N/A (no data)")
@@ -504,6 +509,8 @@ if __name__ == "__main__":
             else:
                 print(f"Put Deltas: {list(put_deltas_dict.keys())}")
                 print("Average Put Delta: N/A (no data)")
+
+            time.sleep(10)
 
 
 

@@ -258,19 +258,41 @@ async def test_send_order():
 
     mt5_conn.place_order_vertical(symbol_y, symbol_x, orders_type, volume, iv_y, iv_x)
 
-async def get_options_names(symbol_y="BBAS3"):
+async def place_order_test():
+    mt5_conn = MT5Connector()
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        return
+    orders_type = [mt5_conn.ORDER_TYPE_BUY, mt5_conn.ORDER_TYPE_SELL] # or "SELL"
+    call_buy = 'BBASL215W4'
+    call_sell = 'BBASL225W4'
+    iv_y = 0.25  # Example IV for symbol Y
+    iv_x = 0.20  # Example IV for symbol X
+    iv_diff = 0.25  # Example IV for symbol Y
+    volume = 1000.0  # Example volume
+    print(f"Preparing to place vertical spread iv diff is {iv_diff}, and {0.3} is the minimum")
+    mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, volume, iv_y, iv_x)
+
+async def close_all_positions_test():
+    mt5_conn = MT5Connector()
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        return  
+    mt5_conn.close_all_positions()
+
+async def get_options_names(symbol_y="VALE3"):
     mt5_conn = MT5Connector()
     if not mt5_conn.initialize():
         print("MT5 initialization failed")
         return None, None
-    symbol_y = "BBAS3"
+    symbol_y = "VALE3"
     spot_data = mt5_conn.get_data(symbol_y,mt5_conn.TIMEFRAME_D1, PERIODS, 0)
     if spot_data is None:
         print("Failed to get historical data")
     else:
         print(f"Retrieved {spot_data.head(1)} for {symbol_y}")
 
-    values = mt5_conn.get_options_chain("BBAS*")
+    values = mt5_conn.get_options_chain("VALE*")
 
     for option_symbol in values:
         symbol_info=mt5_conn.get_symbol_info(option_symbol)
@@ -282,7 +304,7 @@ async def get_options_names(symbol_y="BBAS3"):
                print(f"Option: {option_symbol}, Bid: {bid:.2f}, Ask: {ask:.2f}, Avg: {avg_price:.2f}")
     return values, spot_data
 
-asyncio.run(test_send_order())
+asyncio.run(place_order_test())
 
 # Example Usage
 """

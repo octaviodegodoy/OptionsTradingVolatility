@@ -81,7 +81,7 @@ class MT5Connector:
             type_filling_x = mt5.ORDER_FILLING_FOK
         
         print(f"Placing orders for symbols {symbolY} and {symbolX} and order type {orders_type[0]} and order type {orders_type[1]} respectively")
-        volume = symbol_info_y.volume_min
+
         # Prepare the first request (Y symbol)
         request_y = {
            "action": mt5.TRADE_ACTION_DEAL,
@@ -247,8 +247,11 @@ class MT5Connector:
            
     def get_option_name_by_strike(self,group_name,strike_price,option_type,expiration_time):
         options_symbols = mt5.symbols_get(group_name)
+        
         for s in options_symbols:
+            
             if s.option_right in [option_type] and s.option_strike == strike_price and s.expiration_time == expiration_time:
+               print(f"Found option symbol {s.name} for strike price {strike_price}")
                return s.name
         return None        
     
@@ -346,28 +349,28 @@ class MT5Connector:
         time_now = int(time.time())
         min_expiration = time_now + MIN_DAYS_TO_EXPIRY #10 days ahead
         expiration_time = 0
-        options_symbols = mt5.symbols_get(symbol)
+        group = "*VALE*,!VALE3*"
+        options_symbols = mt5.symbols_get(group)
         expiration_times = []
         chain_expiration = {}
-
+        
+        print(f"Option symbols for group {symbol} size is {len(options_symbols)} ") # meu caralho {options_symbols}")
+         # get the first expiration time after min_expiration")
         for s in options_symbols:
-            
-            if s.option_mode in (0,1): # and s.expiration_time > min_expiration: #call options only
+   
+            if s.expiration_time > min_expiration and s.option_strike > 0:
                expiration_times.append(s.expiration_time)
-               #break
 
+        print(f"Expiration times found: {expiration_times}")                
         sorted_expiration_times = list(dict.fromkeys(expiration_times))
         sorted_expiration_times.sort()
+        expiration_date = datetime.fromtimestamp(sorted_expiration_times[0])
+        print(f"Sorted expiration times: {sorted_expiration_times[0]} that is {expiration_date}  ")
 
-        # Use bisect to find the insertion point
-        index = bisect.bisect_right(sorted_expiration_times, min_expiration)
+        filtered_names = [symbol.name for symbol in options_symbols if symbol.expiration_time == sorted_expiration_times[0] and symbol.option_strike > 0]
+        print(f"Filtered option names for expiration time {sorted_expiration_times[0]}: {filtered_names}")
 
-        # Get the next higher number, if it exists
-        higher_number = sorted_expiration_times[index] if index < len(sorted_expiration_times) else None
-
-        filtered_names = [symbol.name for symbol in options_symbols if symbol.expiration_time == higher_number]
-
-        chain_expiration[higher_number] = filtered_names
+        chain_expiration[sorted_expiration_times[0]] = filtered_names
 
         return chain_expiration
         
