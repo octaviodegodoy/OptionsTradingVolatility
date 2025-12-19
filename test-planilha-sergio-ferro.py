@@ -7,6 +7,7 @@ from scipy.stats import norm
 from scipy.optimize import newton, brentq
 from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PUT_OPTION, STRIKE_PRICE_OFFSET, TYPE_BUY, TYPE_SELL, UNIX_DAYS_IN_SECONDS
 from functions.quant_functions import QuantCalculation
+from functions.utils import calculate_position_deltas
 from mt5_connector import MT5Connector
 from functions.original_spline import c_spline
 import pandas as pd
@@ -254,7 +255,13 @@ def selection_condition(option_info, asset_market_price):
     if bid_option_price == 0.0 or ask_option_price == 0.0 or asset_market_price > K * (1 + STRIKE_PRICE_OFFSET) or asset_market_price < K * (1 - STRIKE_PRICE_OFFSET):
         return False                
     return True
-    
+
+def get_total_delta_calls(positions, mt5_conn, black_scholes_calculator, asset_market_price, time_now):
+    sum_delta_calls = 0.0
+    for pos in positions:        
+        symbol_info = mt5_conn.get_symbol_info(pos.symbol)
+        
+
 
 if __name__ == "__main__":
 
@@ -271,6 +278,8 @@ if __name__ == "__main__":
         sum_delta_calls = 0.0
         sum_delta_puts = 0.0
         call_buy_strike = None
+
+        total_delta = 
 
         for pos in positions:
             
@@ -297,29 +306,16 @@ if __name__ == "__main__":
             K = symbol_info.option_strike
             option_type = symbol_info.option_right  # 0 for call, 1 for put
             iv = black_scholes_calculator.fx_vol(F, K, t, option_market_price, factor, option_type)
-            delta = black_scholes_calculator.fx_delta(F, K, t, iv, factor, option_type, asset_market_price)
-            print(f"Calculated delta {delta:.2f} for symbol {pos.symbol} strike {K} option type {option_type} IV {iv*100:.2f}%")
-            
+            delta = black_scholes_calculator.fx_delta(F, K, t, iv, factor, option_type, asset_market_price)            
             call_buy_strike = K if pos.type == TYPE_BUY else None
-            print(f"Call buy strike recorded as {call_buy_strike} for position type {pos.type} but option type {option_type}")
-            if option_type == CALL_OPTION:
-                if pos.type == TYPE_BUY:                    
-                    sum_delta_calls += delta * pos.volume
-                    print(f"Long Call Position found: {pos.symbol} Strike {K} Volume {pos.volume} sum delta calls {sum_delta_calls:.2f}")
-                elif pos.type == TYPE_SELL:
-                    sum_delta_calls -= delta * pos.volume
-                    print(f"Short Call Position found: {pos.symbol} Strike {K} Volume {pos.volume} sum delta calls {sum_delta_calls:.2f}")
-                            
-            print(f"Position: {pos.symbol}, Delta: {delta:.2f} position type {pos.type} volume {pos.volume} open price {pos.price_open}")
-            if option_type == PUT_OPTION:
-                if pos.type == TYPE_BUY:                    
-                    sum_delta_puts -= delta * pos.volume
-                    print(f"Long Put Position found: {pos.symbol} Strike {K} Volume {pos.volume} sum delta puts {sum_delta_puts:.2f}")
-                elif pos.type == TYPE_SELL:
-                    sum_delta_puts += delta * pos.volume
-                    print(f"Short Put Position found: {pos.symbol} Strike {K} Volume {pos.volume} sum delta puts {sum_delta_puts:.2f}")
+
+            # Replace the selection with:
+            delta_calls_contrib, delta_puts_contrib = calculate_position_deltas(pos, option_type, delta)
+            sum_delta_calls += delta_calls_contrib
+            sum_delta_puts += delta_puts_contrib
             
-            time.sleep(1)
+            
+            time.sleep(5)
         print(f"Total sum delta calls {sum_delta_calls:.2f} total sum delta puts {sum_delta_puts:.2f}")
 
 
@@ -474,9 +470,9 @@ if __name__ == "__main__":
                 iv_y = call_deltas_dict[closest_upper]['iv']
                 iv_x = call_deltas_dict[closest_lower]['iv']
                 print(f"Preparing to place vertical spread iv diff is {iv_diff}, and {0.3} is the minimum")
-                if iv_diff is not None and iv_diff < 0.01:
+                if iv_diff is not None and iv_diff < 0.4:
                     print(f"Placing vertical spread order for call options: Buy {call_buy}, Sell {call_sell}, IV difference {iv_diff:.2f}%")
-                    mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, 1000.0, iv_y, iv_x)
+                    mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, 10000.0, iv_y, iv_x)
             else:
                 print(f"Call Deltas: {list(call_deltas_dict.keys())}")
                 print("Average Call Delta: N/A (no data)")
