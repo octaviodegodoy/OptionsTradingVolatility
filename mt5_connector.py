@@ -349,7 +349,7 @@ class MT5Connector:
         time_now = int(time.time())
         min_expiration = time_now + MIN_DAYS_TO_EXPIRY #10 days ahead
         expiration_time = 0
-        group = "*VALE*,!VALE3*"
+        group = "*ALPA*,!ALPA4*"
         options_symbols = mt5.symbols_get(group)
         expiration_times = []
         chain_expiration = {}
@@ -357,7 +357,7 @@ class MT5Connector:
         print(f"Option symbols for group {symbol} size is {len(options_symbols)} ") # meu caralho {options_symbols}")
          # get the first expiration time after min_expiration")
         for s in options_symbols:
-   
+            print(f"Option symbol: {s.name}, Expiration time: {s.expiration_time}, Strike: {s.option_strike}")
             if s.expiration_time > min_expiration and s.option_strike > 0:
                expiration_times.append(s.expiration_time)
 
