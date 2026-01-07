@@ -5,7 +5,7 @@ import math
 import time
 from scipy.stats import norm
 from scipy.optimize import newton, brentq
-from constants import CALL_OPTION, MIN_DAYS_TO_EXPIRY, PUT_OPTION, STRIKE_PRICE_OFFSET, TYPE_BUY, TYPE_SELL, UNIX_DAYS_IN_SECONDS
+from constants import ASSET_SYMBOL, CALL_OPTION, GARCH_SAMPLE_SIZE, MIN_DAYS_TO_EXPIRY, PUT_OPTION, STRIKE_PRICE_OFFSET, TYPE_BUY, TYPE_SELL, UNIX_DAYS_IN_SECONDS
 from functions.quant_functions import QuantCalculation
 from functions.utils import calculate_position_deltas
 from mt5_connector import MT5Connector
@@ -270,7 +270,7 @@ if __name__ == "__main__":
     positions = mt5_conn.get_open_positions()
     print(f"Total open positions: {len(positions)}")
     black_scholes_calculator = BlackScholesCalculator()
-    asset_symbol = "ALPA4"
+    asset_symbol = ASSET_SYMBOL
     time_now = int(time.time())
 
     if len(positions) > 0:
@@ -319,7 +319,7 @@ if __name__ == "__main__":
 
 
         print(f"Get delta from put option strike {call_buy_strike}")
-        put_option_name = mt5_conn.get_option_name_by_strike("ALPA*", call_buy_strike, PUT_OPTION, position_expiration_time)
+        put_option_name = mt5_conn.get_option_name_by_strike(f"{ASSET_SYMBOL}*", call_buy_strike, PUT_OPTION, position_expiration_time)
         print(f"Put option strike found {put_option_name}")
         # calculate put option IV and delta
         put_option_info = mt5_conn.get_symbol_info(put_option_name)
@@ -346,13 +346,13 @@ if __name__ == "__main__":
             print(f"Total open positions: {len(positions)} sum delta call {sum_delta_calls:.2f} sum delta puts is {sum_delta_puts:.2f} delta put is {delta_put:.2f} expected delta puts to hedge {-put_delta_ratio:.2f} rounded to {-hedge_volume}")
 
     elif len(positions) == 0:
-        symbol_info = mt5_conn.get_symbol_info("ALPA4")
-        selected=mt5_conn.symbol_select("ALPA4",True) 
+        symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL)
+        selected=mt5_conn.symbol_select(ASSET_SYMBOL,True) 
         if not selected: 
-            print("Failed to select ALPA4") 
+            print(f"Failed to select {ASSET_SYMBOL}") 
             mt5_conn.shutdown() 
             quit() 
-            mt5_conn.symbol_select("ALPA4",True)
+            mt5_conn.symbol_select(ASSET_SYMBOL,True)
 
         while True:
 
@@ -360,14 +360,10 @@ if __name__ == "__main__":
             ask_market_price = symbol_info.ask
             asset_market_price = (bid_market_price + ask_market_price)/2       
 
-            print(f"Minimum time to expiration for ALPA* options {MIN_DAYS_TO_EXPIRY/UNIX_DAYS_IN_SECONDS} seconds")
+            print(f"Minimum time to expiration for {ASSET_SYMBOL} options {MIN_DAYS_TO_EXPIRY/UNIX_DAYS_IN_SECONDS} days")
 
             minimum_exp_time = time_now + MIN_DAYS_TO_EXPIRY
-
-            chain_options = mt5_conn.get_option_names_by_expiration_time("ALPA*")
-
-            print(f"Names for the options after 10 days {chain_options[list(chain_options.keys())[0]]}")
-            print(f"Minimum Expiration Time : {minimum_exp_time}")
+            chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL)
 
             options_names_list = chain_options[list(chain_options.keys())[0]]
             expiration_time = list(chain_options.keys())[0]
@@ -375,13 +371,13 @@ if __name__ == "__main__":
             total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
             print(f"T days : {total_days}")
             quant_calc = QuantCalculation()
-            spot_prices_data = mt5_conn.get_data("ALPA4", mt5_conn.get_mt5_connector().TIMEFRAME_D1, 100, 0)["close"].values
+            spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL, mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
             garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
             print(f"GARCH Volatility : {garch_vol:.2f}%")
 
             print(f"Asset Market Price : {asset_market_price:.2f}")   
 
-            print("Asset ALPA4 Market Price : Calculating...")
+            print(f"Asset {ASSET_SYMBOL} Market Price : Calculating...")
 
             positions = mt5_conn.get_open_positions()
             print(f"Total open positions: {len(positions)}")

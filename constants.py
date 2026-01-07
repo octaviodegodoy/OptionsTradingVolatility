@@ -9,3 +9,7 @@ MIN_DAYS_TO_EXPIRY = 25*UNIX_DAYS_IN_SECONDS # 15 days in seconds
 STRIKE_PRICE_OFFSET = 0.05 # 5% above and below current price
 TYPE_BUY = 0
 TYPE_SELL = 1
+OPTION_PRICE_OFFSET = 0.10 # 10% above and below current price
+ASSET_SYMBOL = "PETR4"
+GARCH_SAMPLE_SIZE = 55  # Number of trading days in a year
+ANNUAL_TRADING_DAYS = 252

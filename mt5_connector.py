@@ -349,7 +349,8 @@ class MT5Connector:
         time_now = int(time.time())
         min_expiration = time_now + MIN_DAYS_TO_EXPIRY #10 days ahead
         expiration_time = 0
-        group = "*ALPA*,!ALPA4*"
+        symbol_prefix = symbol[:4]
+        group = f"*{symbol_prefix}*,!{symbol}*"
         options_symbols = mt5.symbols_get(group)
         expiration_times = []
         chain_expiration = {}
@@ -357,18 +358,15 @@ class MT5Connector:
         print(f"Option symbols for group {symbol} size is {len(options_symbols)} ") # meu caralho {options_symbols}")
          # get the first expiration time after min_expiration")
         for s in options_symbols:
-            print(f"Option symbol: {s.name}, Expiration time: {s.expiration_time}, Strike: {s.option_strike}")
+            
             if s.expiration_time > min_expiration and s.option_strike > 0:
                expiration_times.append(s.expiration_time)
 
-        print(f"Expiration times found: {expiration_times}")                
+                       
         sorted_expiration_times = list(dict.fromkeys(expiration_times))
         sorted_expiration_times.sort()
-        expiration_date = datetime.fromtimestamp(sorted_expiration_times[0])
-        print(f"Sorted expiration times: {sorted_expiration_times[0]} that is {expiration_date}  ")
 
         filtered_names = [symbol.name for symbol in options_symbols if symbol.expiration_time == sorted_expiration_times[0] and symbol.option_strike > 0]
-        print(f"Filtered option names for expiration time {sorted_expiration_times[0]}: {filtered_names}")
 
         chain_expiration[sorted_expiration_times[0]] = filtered_names
 

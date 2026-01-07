@@ -4,6 +4,7 @@ from scipy import stats
 import numpy as np
 from arch import arch_model
 import pandas as pd
+from constants import ANNUAL_TRADING_DAYS
 from mt5_connector import MT5Connector
 from scipy.optimize import brentq
 from scipy.stats import norm
@@ -30,25 +31,26 @@ class QuantCalculation:
         return d2
 
     def agarch_estimation(self, prices):
-        print("Got prices for GARCH estimation:", prices)
         # Ensure prices are a numpy array
         prices = np.array(prices)
+        print(f"Prices for AGARCH estimation: {len(prices)}")
 
         # Compute log returns
         log_returns = np.log(prices[1:] / prices[:-1])
 
-        # Fit AGARCH(1,1) model using GJR-GARCH variant (asymmetric)
-        # In the arch library, this is specified with vol='Garch', p=1, o=1, q=1
-        model = arch_model(log_returns, vol='Garch', p=1, o=1, q=1, dist='normal')
+        # Scale returns by 100 to improve parameter estimation (convert to percentage returns)
+        scaled_returns = log_returns * 100
+        
+
+        # Fit GARCH(1,1) model
+        # Standard GARCH with p=1, q=1
+        model = arch_model(scaled_returns, vol='Garch', p=1, o=1, q=1, dist='normal')
 
         # Estimate via maximum likelihood
         results = model.fit(disp='off')
 
-        # Print the summary
-        print(results.summary())
-
         # Optional: Extract annualized volatility (assuming 252 trading days)
-        annualized_vol = results.conditional_volatility[-1] * np.sqrt(252)
+        annualized_vol = (results.conditional_volatility[-1] / 100) * np.sqrt(ANNUAL_TRADING_DAYS)
 
         return annualized_vol
     
