@@ -5,7 +5,7 @@ import math
 import time
 from scipy.stats import norm
 from scipy.optimize import newton, brentq
-from constants import ASSET_SYMBOL, CALL_OPTION, GARCH_SAMPLE_SIZE, MIN_DAYS_TO_EXPIRY, PUT_OPTION, STRIKE_PRICE_OFFSET, TYPE_BUY, TYPE_SELL, UNIX_DAYS_IN_SECONDS
+from constants import ASSET_SYMBOL, CALL_OPTION, GARCH_SAMPLE_SIZE, IV_DIFF_THRESHOLD, MIN_DAYS_TO_EXPIRY, PUT_OPTION, STRIKE_PRICE_OFFSET, TYPE_BUY, TYPE_SELL, UNIX_DAYS_IN_SECONDS
 from functions.quant_functions import QuantCalculation
 from functions.utils import calculate_position_deltas
 from mt5_connector import MT5Connector
@@ -367,7 +367,7 @@ if __name__ == "__main__":
 
             options_names_list = chain_options[list(chain_options.keys())[0]]
             expiration_time = list(chain_options.keys())[0]
-            print(f"Listing options from the selected expiration time: {expiration_time}")
+            print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(expiration_time)}")
             total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
             print(f"T days : {total_days}")
             quant_calc = QuantCalculation()
@@ -465,7 +465,7 @@ if __name__ == "__main__":
                 iv_y = call_deltas_dict[closest_upper]['iv']
                 iv_x = call_deltas_dict[closest_lower]['iv']
                 print(f"Preparing to place vertical spread iv diff is {iv_diff}, and {0.3} is the minimum")
-                if iv_diff is not None and iv_diff < 0.4:
+                if iv_diff is not None and iv_diff < IV_DIFF_THRESHOLD:
                     print(f"Placing vertical spread order for call options: Buy {call_buy}, Sell {call_sell}, IV difference {iv_diff:.2f}%")
                     mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, 10000.0, iv_y, iv_x)
             else:
