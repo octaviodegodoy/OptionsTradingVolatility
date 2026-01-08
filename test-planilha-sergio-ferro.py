@@ -256,6 +256,13 @@ def selection_condition(option_info, asset_market_price):
         return False                
     return True
 
+def get_strike_from_option_name(option_name, mt5_conn):
+    """Get strike price from option symbol name"""
+    option_info = mt5_conn.get_symbol_info(option_name)
+    if option_info is None:
+        return None
+    return option_info.option_strike
+
 def get_total_delta_calls(positions, mt5_conn, black_scholes_calculator, asset_market_price, time_now):
     sum_delta_calls = 0.0
     for pos in positions:        
@@ -354,42 +361,47 @@ if __name__ == "__main__":
             quit() 
             mt5_conn.symbol_select(ASSET_SYMBOL,True)
 
+        # get garch volatility
+        quant_calc = QuantCalculation()
+        spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL, mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
+        garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
+        print(f"GARCH Volatility : {garch_vol:.2f}%")
+
+        #get T days to expiration options chain
+        minimum_exp_time = time_now + MIN_DAYS_TO_EXPIRY
+        chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL)
+
+        options_names_list = chain_options[list(chain_options.keys())[0]]
+        expiration_time = list(chain_options.keys())[0]
+        print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(expiration_time)}")
+        total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
+        print(f"T days : {total_days}")
+        T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
+
+        # get r interest rate
+        r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
+        print(f"Interest Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
+
+        print(f"Futures Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
+        factor = (r/100+1)**((-T)/252)
+        print(f"Factor : {factor}")
+
         while True:
 
             bid_market_price = symbol_info.bid
             ask_market_price = symbol_info.ask
-            asset_market_price = (bid_market_price + ask_market_price)/2       
+            asset_market_price = (bid_market_price + ask_market_price)/2
 
-            print(f"Minimum time to expiration for {ASSET_SYMBOL} options {MIN_DAYS_TO_EXPIRY/UNIX_DAYS_IN_SECONDS} days")
+            # Calculate forward price F
+            F = asset_market_price / factor
+            print(f"Asset Market Price : {asset_market_price:.2f}" and f" Forward Price F : {F:.2f}" )        
 
-            minimum_exp_time = time_now + MIN_DAYS_TO_EXPIRY
-            chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL)
-
-            options_names_list = chain_options[list(chain_options.keys())[0]]
-            expiration_time = list(chain_options.keys())[0]
-            print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(expiration_time)}")
-            total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
-            print(f"T days : {total_days}")
-            quant_calc = QuantCalculation()
-            spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL, mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
-            garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
-            print(f"GARCH Volatility : {garch_vol:.2f}%")
-
-            print(f"Asset Market Price : {asset_market_price:.2f}")   
-
-            print(f"Asset {ASSET_SYMBOL} Market Price : Calculating...")
+            print(f"Minimum time to expiration for {ASSET_SYMBOL} options {MIN_DAYS_TO_EXPIRY/UNIX_DAYS_IN_SECONDS} days")            
 
             positions = mt5_conn.get_open_positions()
-            print(f"Total open positions: {len(positions)}")
+            print(f"Total open positions: {len(positions)}")  
 
-            T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
 
-            # expiration_time is a Unix timestamp (seconds); convert to pandas Timestamp for interpolation
-            r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
-            print(f"Futures Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
-            factor = (r/100+1)**((-T)/252)
-            print(f"Factor : {factor}")
-            F = asset_market_price / factor
             print(f"Fut DI Price : {F:.2f}")
             call_deltas_dict = {}
             put_deltas_dict = {}  # Dictionary to store {delta: iv}
