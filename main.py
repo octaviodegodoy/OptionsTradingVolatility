@@ -9,6 +9,8 @@ from functions.quant_functions import QuantCalculation
 from skew_strategy import SkewStrategy
 import pandas as pd
 
+from utils import count_weekdays
+
 
 async def main():
     logging.basicConfig(level=logging.INFO)
@@ -33,9 +35,13 @@ async def main():
     time_now = int(time.time())
     total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
     logger.info(f"T days from now : {total_days}")
+    T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
     # get r interest rate
     r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
     logger.info(f"Interest Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
+    factor = (r/100+1)**((-T)/252)
+    logger.info(f"Factor : {factor}")
+
 
     
     await asyncio.sleep(5)
