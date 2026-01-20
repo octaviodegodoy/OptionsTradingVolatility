@@ -355,23 +355,23 @@ if __name__ == "__main__":
             print(f"Total open positions: {len(positions)} sum delta call {sum_delta_calls:.2f} sum delta puts is {sum_delta_puts:.2f} delta put is {delta_put:.2f} expected delta puts to hedge {-put_delta_ratio:.2f} rounded to {-hedge_volume}")
 
     elif len(positions) == 0:
-        symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[0])
-        selected=mt5_conn.symbol_select(ASSET_SYMBOL[0],True) 
+        symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[1])
+        selected=mt5_conn.symbol_select(ASSET_SYMBOL[1],True) 
         if not selected: 
-            print(f"Failed to select {ASSET_SYMBOL[0]}") 
+            print(f"Failed to select {ASSET_SYMBOL[1]}") 
             mt5_conn.shutdown() 
             quit() 
-            mt5_conn.symbol_select(ASSET_SYMBOL[0],True)
+            mt5_conn.symbol_select(ASSET_SYMBOL[1],True)
 
         # get garch volatility
         quant_calc = QuantCalculation()
-        spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL[0], mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
+        spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL[1], mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
         garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
         print(f"GARCH Volatility : {garch_vol:.2f}%")
 
         #get T days to expiration options chain
         minimum_exp_time = time_now + MIN_DAYS_TO_EXPIRY
-        chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[0])
+        chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[1])
 
         options_names_list = chain_options[list(chain_options.keys())[0]]
         expiration_time = list(chain_options.keys())[0]
@@ -398,7 +398,7 @@ if __name__ == "__main__":
             F = asset_market_price / factor
             print(f"Asset Market Price : {asset_market_price:.2f}" and f" Forward Price F : {F:.2f}" )        
 
-            print(f"Minimum time to expiration for {ASSET_SYMBOL} options {MIN_DAYS_TO_EXPIRY/UNIX_DAYS_IN_SECONDS} days")            
+            print(f"Minimum time to expiration for {ASSET_SYMBOL[1]} options {MIN_DAYS_TO_EXPIRY/UNIX_DAYS_IN_SECONDS} days")            
 
             positions = mt5_conn.get_open_positions()
             print(f"Total open positions: {len(positions)}")  

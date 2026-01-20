@@ -102,14 +102,13 @@ class Utils:
                 delta = self.black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
                 iv_call_brentq = self.black_scholes_calculator.implied_vol(F, K, T, option_market_price, factor, option_type)
                 delta = round(delta, 2)
-                option_type_str = "Call" if option_type == CALL_OPTION else "Put"
                 iv = iv * 100  # Convert to percentage
                 iv_call_brentq = iv_call_brentq * 100  # Convert to percentage
 
                 if option_type == CALL_OPTION:
-                    call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name}
+                    call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price}
                 elif option_type == PUT_OPTION:
-                    put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name}
+                    put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price}
 
         return call_deltas_dict, put_deltas_dict
 

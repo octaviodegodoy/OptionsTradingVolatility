@@ -1,17 +1,38 @@
 import numpy as np
+from utils import Utils
+utils = Utils()
+from mt5_connector import MT5Connector
+from constants import ASSET_SYMBOL
 
-call_list = [18.12,14.39,22.46,21.50,21.82,19.56,20.62,21.46,20.65]
-put_list  = [20.15,24.09,25.05,23.76,24.32,25.09,18.24,30.30]
+mt5_conn = MT5Connector()
 
-# align length (use first 8 of calls to match 8 puts)
-n = min(len(call_list), len(put_list))
-calls = np.array(call_list[:n])
-puts  = np.array(put_list[:n])
+for asset in ASSET_SYMBOL:
+    selected=mt5_conn.symbol_select(asset,True) 
+    if not selected: 
+        print(f"Failed to select {asset}")
+   # chain_options = mt5_conn.get_option_names_by_expiration_time(asset)
+   # symbol_info = mt5_conn.get_symbol_info(asset)
+   # print("Options Chain for", asset, "retrieved", chain_options.values(), "options.")
+    
 
-x = np.arange(n)        # index proxy for strike/delta
+chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[2])
+symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
+print("Options Chain for", ASSET_SYMBOL[2], "retrieved", chain_options.values(), "options.")
+call_deltas_dict, put_deltas_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
+call_iv_dict = {k: v['iv'] for k, v in call_deltas_dict.items()}
+put_iv_dict = {k: v['iv'] for k, v in put_deltas_dict.items()}
+#print(f"Options Data Retrieved: calls {call_iv_dict}, puts {put_iv_dict}")
+
+n_options = min(len(call_iv_dict), len(put_iv_dict))
+call_deltas = np.array(list(call_iv_dict.keys())[:n_options])
+put_deltas  = np.array(list(put_iv_dict.keys())[:n_options])
+
+#print("Call Deltas:", call_deltas)
+#print("Put Deltas:", put_deltas)
+
+x = np.arange(n_options)  # index proxy for strike/delta
 xbar = x.mean()
 
-# slope = sum((x-xbar)*(y-ybar)) / sum((x-xbar)**2)
 def slope(x, y):
     xbar = x.mean()
     ybar = y.mean()
@@ -19,8 +40,8 @@ def slope(x, y):
     den = ((x - xbar)**2).sum()
     return num / den
 
-slope_calls = slope(x, calls)
-slope_puts  = slope(x, puts)
+slope_calls = slope(x, call_deltas)
+slope_puts  = slope(x, put_deltas)
 
 print("slope_calls:", slope_calls)
 print("slope_puts:", slope_puts)
