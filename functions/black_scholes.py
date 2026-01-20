@@ -168,7 +168,7 @@ class BlackScholesCalculator:
         elif ID == PUT_OPTION:
             return self.fx_put_vol(F, K, T, price, r)
         
-    def fx_gamma(self,F, S, T, sigma, r):
+    def fx_gamma(self,F, K, S, T, sigma, r):
         
         x = self.d_1(F, K, T, sigma)
         Pi = math.pi
