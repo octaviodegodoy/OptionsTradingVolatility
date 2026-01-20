@@ -2,7 +2,7 @@ from datetime import datetime, time, timedelta
 import logging
 from turtle import pd
 from functions.black_scholes import BlackScholesCalculator
-from constants import ASSET_SYMBOL, BRAZILIAN_HOLIDAYS, STRIKE_PRICE_OFFSET, UNIX_DAYS_IN_SECONDS
+from constants import ASSET_SYMBOL, BRAZILIAN_HOLIDAYS, CALL_OPTION, PUT_OPTION, STRIKE_PRICE_OFFSET, UNIX_DAYS_IN_SECONDS
 import time
 import pandas as pd
 
@@ -35,7 +35,7 @@ class Utils:
         self.logger.info(f"Interest Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
         factor = (r/100+1)**((-T)/252)
         self.logger.info(f"Factor : {factor}")
-        return factor
+        return factor,T
 
     def get_tenor(self, expiration_time):
         time_now = int(time.time())
@@ -53,25 +53,27 @@ class Utils:
         if not selected_option: 
            print(f"Failed to select option {option_info.name}")
 
-        option_bid_market_price = option_info.bid
-        option_ask_market_price = option_info.ask
-
-        option.market_price = 
-        K = option_info.option_strike
-        if K is not None and ask_market_price > 0.0 and bid_market_price > 0.0:
-            logging.info(f"Option Strike Price: {K} tem bid zerado : {bid_market_price} e ask zerado: {ask_market_price} e asset price: {asset_market_price}")
+        option_bid = option_info.bid
+        option_ask = option_info.ask
+        K = option_info.option_strike        
 
         if option_info is None:
             print(f"Failed to get info for option")
             return False
-        if bid_market_price == 0.0 or ask_market_price == 0.0 or asset_market_price > K * (1 + STRIKE_PRICE_OFFSET) or asset_market_price < K * (1 - STRIKE_PRICE_OFFSET):
+        if option_bid == 0.0 or option_ask == 0.0 or asset_market_price > K * (1 + STRIKE_PRICE_OFFSET) or asset_market_price < K * (1 - STRIKE_PRICE_OFFSET):
             return False
-        logging.info(f"Option {option_info.name} passed selection condition.")                
+                      
         return True
     
-    def get_calls_and_puts_data(self, chain_options):
+    def get_calls_and_puts_data(self, chain_options, symbol_info):
         call_deltas_dict = {}
-        put_deltas_dict = {} 
+        put_deltas_dict = {}
+        factor,T = self.get_factor_from_expiration_time(list(chain_options.keys())[0])
+        logging.info(f"Calculating IVs and Deltas for options with T={T} weekdays to expiry. and factor={factor:.6f} ")
+        asset_bid = symbol_info.bid
+        asset_ask = symbol_info.ask
+        asset_market_price = (asset_bid + asset_ask) / 2
+        F = asset_market_price / factor
 
         options_names_list = chain_options[list(chain_options.keys())[0]]
         for option_name in options_names_list:
@@ -86,9 +88,29 @@ class Utils:
                 if option_info is None:
                     print(f"Failed to get info for option {option_name}")
                     continue
-                if not self.selection_condition(option_info):
+                if not self.selection_condition(option_info, symbol_info):
                     continue
                 K = option_info.option_strike
-                logging.info(f"Processing option: {option_name} with strike price: {K}")  
+
+                bid_option_price = option_info.bid
+                ask_option_price = option_info.ask
+                option_market_price = (bid_option_price + ask_option_price)/2
+                K = option_info.option_strike
+                option_type = option_info.option_right  # 0 for call, 1 for put
+                
+                iv = self.black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, option_type)
+                delta = self.black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
+                iv_call_brentq = self.black_scholes_calculator.implied_vol(F, K, T, option_market_price, factor, option_type)
+                delta = round(delta, 2)
+                option_type_str = "Call" if option_type == CALL_OPTION else "Put"
+                iv = iv * 100  # Convert to percentage
+                iv_call_brentq = iv_call_brentq * 100  # Convert to percentage
+
+                if option_type == CALL_OPTION:
+                    call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name}
+                elif option_type == PUT_OPTION:
+                    put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name}
+
+        return call_deltas_dict, put_deltas_dict
 
 

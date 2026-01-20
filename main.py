@@ -27,12 +27,13 @@ async def main():
 
 
     # get options chain
+    symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[0])
     chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[0])
     logger.info(f"Options Chain for {ASSET_SYMBOL[0]} retrieved {chain_options.values()} options.")
     expiration_time = list(chain_options.keys())[0]
     logger.info(f"Selected Expiration Time: {datetime.fromtimestamp(expiration_time)}")
-    options_data = utils.get_calls_and_puts_data(chain_options)
-    logger.info(f"Options Data Retrieved: {options_data}")
+    calls_dict, puts_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
+    logger.info(f"Options Data Retrieved: calls {calls_dict}, puts {puts_dict}")
     #F = utils.get_factor_from_expiration_time(expiration_time)
     #logger.info(f"Tenor Factor from utils function: {F}")
     #T = utils.get_tenor(expiration_time)

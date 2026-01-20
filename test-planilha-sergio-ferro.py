@@ -13,7 +13,8 @@ from functions.original_spline import c_spline
 import pandas as pd
 import numpy as np
 
-from utils import count_weekdays
+from utils import Utils
+
 
 class BlackScholesCalculator:
     def __init__(self):
@@ -273,11 +274,12 @@ def get_total_delta_calls(positions, mt5_conn, black_scholes_calculator, asset_m
 if __name__ == "__main__":
 
     mt5_conn = MT5Connector()
+    utils = Utils()
 
     positions = mt5_conn.get_open_positions()
     print(f"Total open positions: {len(positions)}")
     black_scholes_calculator = BlackScholesCalculator()
-    asset_symbol = ASSET_SYMBOL
+    asset_symbol = ASSET_SYMBOL[0]
     time_now = int(time.time())
 
     if len(positions) > 0:
@@ -305,7 +307,7 @@ if __name__ == "__main__":
             r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(position_expiration_time, unit='s'))
             total_days_left = (position_expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
 
-            t = count_weekdays(datetime.fromtimestamp(time_now), int(total_days_left))
+            t = utils.count_weekdays(datetime.fromtimestamp(time_now), int(total_days_left))
             factor = (r/100+1)**((-t)/252)
             F = asset_market_price / factor
 
@@ -353,30 +355,30 @@ if __name__ == "__main__":
             print(f"Total open positions: {len(positions)} sum delta call {sum_delta_calls:.2f} sum delta puts is {sum_delta_puts:.2f} delta put is {delta_put:.2f} expected delta puts to hedge {-put_delta_ratio:.2f} rounded to {-hedge_volume}")
 
     elif len(positions) == 0:
-        symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL)
-        selected=mt5_conn.symbol_select(ASSET_SYMBOL,True) 
+        symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[0])
+        selected=mt5_conn.symbol_select(ASSET_SYMBOL[0],True) 
         if not selected: 
-            print(f"Failed to select {ASSET_SYMBOL}") 
+            print(f"Failed to select {ASSET_SYMBOL[0]}") 
             mt5_conn.shutdown() 
             quit() 
-            mt5_conn.symbol_select(ASSET_SYMBOL,True)
+            mt5_conn.symbol_select(ASSET_SYMBOL[0],True)
 
         # get garch volatility
         quant_calc = QuantCalculation()
-        spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL, mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
+        spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL[0], mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
         garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
         print(f"GARCH Volatility : {garch_vol:.2f}%")
 
         #get T days to expiration options chain
         minimum_exp_time = time_now + MIN_DAYS_TO_EXPIRY
-        chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL)
+        chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[0])
 
         options_names_list = chain_options[list(chain_options.keys())[0]]
         expiration_time = list(chain_options.keys())[0]
         print(f"Listing options from the selected expiration time: {datetime.fromtimestamp(expiration_time)}")
         total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
         print(f"T days : {total_days}")
-        T = count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
+        T = utils.count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
 
         # get r interest rate
         r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
@@ -434,6 +436,7 @@ if __name__ == "__main__":
                     iv_call_brentq = black_scholes_calculator.implied_vol(F, K, T, option_market_price, factor, option_type)
                     print(f"Option {option_name} IV {iv_call_brentq}")
                     iv = black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, option_type)
+                    print(f"Option {option_name} IV (bisection) {iv}")
                     delta = black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
                     delta = round(delta, 2)
                     option_type_str = "Call" if option_type == CALL_OPTION else "Put"
