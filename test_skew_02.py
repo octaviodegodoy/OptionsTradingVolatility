@@ -14,14 +14,14 @@ for asset in ASSET_SYMBOL:
    # symbol_info = mt5_conn.get_symbol_info(asset)
    # print("Options Chain for", asset, "retrieved", chain_options.values(), "options.")
     
-
-chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[2])
-symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
-print("Options Chain for", ASSET_SYMBOL[2], "retrieved", chain_options.values(), "options.")
+asset_symbol = ASSET_SYMBOL[2]
+chain_options = mt5_conn.get_option_names_by_expiration_time(asset_symbol)
+symbol_info = mt5_conn.get_symbol_info(asset_symbol)
+print("Options Chain for", asset_symbol, "retrieved", chain_options.values(), "options.")
 call_deltas_dict, put_deltas_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
 call_iv_dict = {k: v['iv'] for k, v in call_deltas_dict.items()}
 put_iv_dict = {k: v['iv'] for k, v in put_deltas_dict.items()}
-#print(f"Options Data Retrieved: calls {call_iv_dict}, puts {put_iv_dict}")
+print(f"Options Data Retrieved: calls {call_iv_dict}, puts {put_iv_dict}")
 
 n_options = min(len(call_iv_dict), len(put_iv_dict))
 call_deltas = np.array(list(call_iv_dict.keys())[:n_options])

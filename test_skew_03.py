@@ -16,6 +16,10 @@ Run:
 """
 import numpy as np
 
+from constants import ASSET_SYMBOL
+from mt5_connector import MT5Connector
+from utils import Utils
+
 def are_puts_steeper(delta_puts, put_ivs, delta_calls, call_ivs, min_diff_pp_per_delta=0.0):
     """
     Check if put IVs have a steeper slope than call IVs when fitted linearly.
@@ -43,6 +47,8 @@ def are_puts_steeper(delta_puts, put_ivs, delta_calls, call_ivs, min_diff_pp_per
         - Steeper means larger absolute slope value (more negative)
     """
     # Handle data length mismatch (drop extra IVs if needed)
+
+
     put_ivs = put_ivs[:len(delta_puts)]
     
     # Convert put deltas to absolute values
@@ -68,12 +74,30 @@ def are_puts_steeper(delta_puts, put_ivs, delta_calls, call_ivs, min_diff_pp_per
     return slope_diff >= min_diff_pp_per_delta
 
 
-# Original data
-delta_puts = np.array([-0.18, -0.25, -0.31, -0.39, -0.47, -0.56, -0.6])
-put_list_all = np.array([20.15, 24.09, 25.05, 23.76, 24.32, 25.09, 18.24, 30.30])  # 8 IVs, will drop last
+mt5_conn = MT5Connector()
+utils = Utils()
+asset_symbol = ASSET_SYMBOL[2]
+chain_options = mt5_conn.get_option_names_by_expiration_time(asset_symbol)
+symbol_info = mt5_conn.get_symbol_info(asset_symbol)
+print("Options Chain for", asset_symbol, "retrieved", chain_options.values(), "options.")
+call_deltas_dict, put_deltas_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
+print(f"Options Data Retrieved: calls {call_deltas_dict.keys()}, puts {put_deltas_dict.keys()}")
+call_iv_dict = {k: v['iv'] for k, v in call_deltas_dict.items()}
+put_iv_dict = {k: v['iv'] for k, v in put_deltas_dict.items()}
 
-delta_calls = np.array([0.9, 0.89, 0.72, 0.64, 0.55, 0.46, 0.37, 0.22, 0.28])
-call_list = np.array([18.12, 14.39, 22.46, 21.50, 21.82, 19.56, 20.62, 21.46, 20.65])
+
+real_delta_calls = np.array(list(call_iv_dict.keys()))
+real_delta_puts  = np.array(list(put_iv_dict.keys()))
+real_iv_calls = np.array(list(call_iv_dict.values()))
+real_iv_puts  = np.array(list(put_iv_dict.values()))
+
+
+# Original data
+delta_puts = real_delta_puts # np.array([-0.18, -0.25, -0.31, -0.39, -0.47, -0.56, -0.6])
+put_list_all = real_iv_puts # np.array([20.15, 24.09, 25.05, 23.76, 24.32, 25.09, 18.24, 30.30])  # 8 IVs, will drop last
+
+delta_calls = real_delta_calls
+call_list = real_iv_calls
 
 # Prepare puts: drop the extra IV (assumption)
 puts_iv = put_list_all[:len(delta_puts)]  # take first 7 IVs
@@ -138,8 +162,7 @@ test_thresholds = [0.0, 0.5, 1.0, 1.5, 2.0]
 for threshold in test_thresholds:
     result = are_puts_steeper(delta_puts, put_list_all, delta_calls, call_list, 
                              min_diff_pp_per_delta=threshold)
-    print(f"Min threshold = {threshold:.1f} pp/delta: Puts steeper? {result}")
-
+    print(f"Min threshold = {threshold:.2f} pp/delta: Puts steeper? {result}")
 # Example of predicted IV at a given delta (optional demonstration)
 target_delta = 0.25
 pred_put_iv_at_025 = intercept_put + slope_put * target_delta
