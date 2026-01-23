@@ -76,15 +76,40 @@ def are_puts_steeper(delta_puts, put_ivs, delta_calls, call_ivs, min_diff_pp_per
 
 mt5_conn = MT5Connector()
 utils = Utils()
-asset_symbol = ASSET_SYMBOL[2]
+asset_symbol = ASSET_SYMBOL[0]
+
 chain_options = mt5_conn.get_option_names_by_expiration_time(asset_symbol)
 symbol_info = mt5_conn.get_symbol_info(asset_symbol)
+atm_price = (symbol_info.bid + symbol_info.ask) / 2
+print(f"ATM strike price for {asset_symbol} is approximately {atm_price}")
 print("Options Chain for", asset_symbol, "retrieved", chain_options.values(), "options.")
 call_deltas_dict, put_deltas_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
+print("---- Retrieved Options Data ----")
+print(f"Puts dict first 5: {list(put_deltas_dict.items())[:5]}")
+call_strikes = [v['strike'] for v in call_deltas_dict.values()]
+put_strikes = [v['strike'] for v in put_deltas_dict.values()]
+all_strikes = set(call_strikes) | set(put_strikes)
+sorted_strikes = sorted(all_strikes)
+print(f"All strikes (merged): {sorted(all_strikes)}")
+atm_strike = min(sorted_strikes, key=lambda x: abs(x - atm_price))
+
+print(f"ATM strike determined from available strikes: {atm_strike}")
+atm_strikes = sorted_strikes[max(0, sorted_strikes.index(atm_strike)-1):sorted_strikes.index(atm_strike)+1]
+print(f"ATM strikes: {atm_strikes}")
+
+# Get the delta (key) from call_deltas_dict where strike is atm_strike
+atm_put_delta = next((delta for delta, v in put_deltas_dict.items() if v['strike'] == atm_strike), None)
+
+if atm_put_delta is not None:
+    print(f"\nATM Put Delta: {atm_put_delta:.3f} at strike {atm_strike}")
+    print(f"ATM Put IV: {put_deltas_dict[atm_put_delta]['iv']:.2f}% and put strike: {put_deltas_dict[atm_put_delta]['strike']}")
+else:
+    print(f"\nNo put option found at ATM strike {atm_strike}")
+
 print(f"Options Data Retrieved: calls {call_deltas_dict.keys()}, puts {put_deltas_dict.keys()}")
 call_iv_dict = {k: v['iv'] for k, v in call_deltas_dict.items()}
 put_iv_dict = {k: v['iv'] for k, v in put_deltas_dict.items()}
-
+ 
 
 real_delta_calls = np.array(list(call_iv_dict.keys()))
 real_delta_puts  = np.array(list(put_iv_dict.keys()))

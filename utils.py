@@ -106,9 +106,9 @@ class Utils:
                 iv_call_brentq = iv_call_brentq * 100  # Convert to percentage
 
                 if option_type == CALL_OPTION:
-                    call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price}
+                    call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price, 'strike': K}
                 elif option_type == PUT_OPTION:
-                    put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price}
+                    put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price, 'strike': K}
 
         return call_deltas_dict, put_deltas_dict
 
