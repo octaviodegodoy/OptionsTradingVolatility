@@ -363,6 +363,8 @@ class MT5Connector:
                        
         sorted_expiration_times = list(dict.fromkeys(expiration_times))
         sorted_expiration_times.sort()
+        for et in sorted_expiration_times:
+            logging.info(f"Found expiration time: {datetime.fromtimestamp(et).strftime('%Y-%m-%d')} for symbol {symbol}")
 
         filtered_names = [symbol.name for symbol in options_symbols if symbol.expiration_time == sorted_expiration_times[0] and symbol.option_strike > 0]
 

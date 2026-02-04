@@ -5,7 +5,7 @@ from arch import arch_model
 from mt5_connector import MT5Connector
 mt5_conn = MT5Connector()
 
-df = mt5_conn.get_data("PETR4", mt5_conn.TIMEFRAME_D1, 60,0)
+df = mt5_conn.get_data("BOVA11", mt5_conn.TIMEFRAME_D1, 60,0)
 print(f" Data frame length {len(df)}")
 print(f" Last price {df.tail(1)}")
 
