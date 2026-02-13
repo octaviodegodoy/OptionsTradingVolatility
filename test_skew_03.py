@@ -16,7 +16,7 @@ Run:
 """
 import numpy as np
 
-from constants import ASSET_SYMBOL, GARCH_SAMPLE_SIZE
+from constants import ASSET_SYMBOL, DIFF_IV_GARCH_PUTS_THRESHOLD_PCT, GARCH_SAMPLE_SIZE, IV_DIFF_THRESHOLD, STEEP_THRESHOLD
 from mt5_connector import MT5Connector
 from functions.quant_functions import QuantCalculation
 from utils import Utils
@@ -95,6 +95,7 @@ print("---- Retrieved Options Data ----")
 print(f"Puts dict first 5: {list(put_deltas_dict.items())[:5]}")
 call_strikes = [v['strike'] for v in call_deltas_dict.values()]
 put_strikes = [v['strike'] for v in put_deltas_dict.values()]
+put_strikes_and_ivs = [(v['strike'], v['iv']) for v in put_deltas_dict.values()]
 all_strikes = set(call_strikes) | set(put_strikes)
 sorted_strikes = sorted(all_strikes)
 print(f"All strikes (merged): {sorted(all_strikes)}")
@@ -103,9 +104,12 @@ atm_strike = min(sorted_strikes, key=lambda x: abs(x - atm_price))
 print(f"ATM strike determined from available strikes: {atm_strike}")
 atm_strikes = sorted_strikes[max(0, sorted_strikes.index(atm_strike)-1):sorted_strikes.index(atm_strike)+1]
 print(f"ATM strikes: {atm_strikes}")
-ivs_in_atm_strikes_puts = [v['iv'] for v in put_deltas_dict.values() if v['strike'] in atm_strikes]
-print(f"IV at ATM strike for puts: {ivs_in_atm_strikes_puts}")
 print(f"GARCH Volatility : {garch_vol:.2f}%")
+diff_iv_garch_puts = [(v['strike'], v['iv'] - garch_vol) for v in put_deltas_dict.values() if v['strike'] in atm_strikes]
+min_diff_iv_garch_puts = min(diff_iv_garch_puts, key=lambda x: abs(x[1]))
+min_diff_iv_garch_puts_result = min_diff_iv_garch_puts[1]
+print(f"Difference between put IVs and GARCH volatility at ATM strikes: {diff_iv_garch_puts} min difference: {min_diff_iv_garch_puts_result}")
+
 # Get the delta (key) from call_deltas_dict where strike is atm_strike
 atm_put_delta = next((delta for delta, v in put_deltas_dict.items() if v['strike'] == atm_strike), None)
 
@@ -192,11 +196,11 @@ print("\n" + "="*60)
 print("FUNCTION TESTS:")
 print("="*60)
 
-test_thresholds = [0.0, 0.5, 1.0, 1.5, 2.0]
-for threshold in test_thresholds:
-    result = are_puts_steeper(delta_puts, put_list_all, delta_calls, call_list, 
-                             min_diff_pp_per_delta=threshold)
-    print(f"Min threshold = {threshold:.2f} pp/delta: Puts steeper? {result}")
+
+result = are_puts_steeper(delta_puts, put_list_all, delta_calls, call_list, min_diff_pp_per_delta=STEEP_THRESHOLD)
+print(f"Threshold = {STEEP_THRESHOLD:.2f} pp/delta: Puts steeper? {result} and min IV at ATM puts is {min_diff_iv_garch_puts_result:.2f} pp different from GARCH volatility (threshold was {DIFF_IV_GARCH_PUTS_THRESHOLD_PCT} pp)")
+result_iv_threshold = min_diff_iv_garch_puts_result - DIFF_IV_GARCH_PUTS_THRESHOLD_PCT
+print(f"Result for IV difference threshold: {result_iv_threshold:.2f} pp difference between put IV and GARCH volatility at ATM strikes (threshold was {DIFF_IV_GARCH_PUTS_THRESHOLD_PCT} pp)")
 # Example of predicted IV at a given delta (optional demonstration)
 target_delta = 0.25
 pred_put_iv_at_025 = intercept_put + slope_put * target_delta

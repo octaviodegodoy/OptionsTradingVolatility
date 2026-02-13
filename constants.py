@@ -14,6 +14,8 @@ ASSET_SYMBOL = ["BOVA11", "VALE3", "PETR4", "GOAU4", "BBAS3", "BRAV3", "ITUB4", 
 GARCH_SAMPLE_SIZE = 55  # Number of trading days in a year
 ANNUAL_TRADING_DAYS = 252
 IV_DIFF_THRESHOLD = 0.01  # 5% difference threshold for implied volatility
+STEEP_THRESHOLD = 1.5 # Minimum steepness threshold in percentage points per delta
+DIFF_IV_GARCH_PUTS_THRESHOLD_PCT = 3 # 1% difference threshold for IV of ATM puts compared to GARCH volatility
 
 BRAZILIAN_HOLIDAYS = [
     "2026-02-16",
