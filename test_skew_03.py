@@ -16,8 +16,9 @@ Run:
 """
 import numpy as np
 
-from constants import ASSET_SYMBOL
+from constants import ASSET_SYMBOL, GARCH_SAMPLE_SIZE
 from mt5_connector import MT5Connector
+from functions.quant_functions import QuantCalculation
 from utils import Utils
 
 def are_puts_steeper(delta_puts, put_ivs, delta_calls, call_ivs, min_diff_pp_per_delta=0.0):
@@ -76,9 +77,15 @@ def are_puts_steeper(delta_puts, put_ivs, delta_calls, call_ivs, min_diff_pp_per
 
 mt5_conn = MT5Connector()
 utils = Utils()
+quant_calc = QuantCalculation()
+
 asset_symbol = ASSET_SYMBOL[0]
+spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL[0], mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
+garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
+
 
 chain_options = mt5_conn.get_option_names_by_expiration_time(asset_symbol)
+print(f"Retrieved expiration chain for {asset_symbol} with {chain_options} options.")
 symbol_info = mt5_conn.get_symbol_info(asset_symbol)
 atm_price = (symbol_info.bid + symbol_info.ask) / 2
 print(f"ATM strike price for {asset_symbol} is approximately {atm_price}")
@@ -96,7 +103,9 @@ atm_strike = min(sorted_strikes, key=lambda x: abs(x - atm_price))
 print(f"ATM strike determined from available strikes: {atm_strike}")
 atm_strikes = sorted_strikes[max(0, sorted_strikes.index(atm_strike)-1):sorted_strikes.index(atm_strike)+1]
 print(f"ATM strikes: {atm_strikes}")
-
+ivs_in_atm_strikes_puts = [v['iv'] for v in put_deltas_dict.values() if v['strike'] in atm_strikes]
+print(f"IV at ATM strike for puts: {ivs_in_atm_strikes_puts}")
+print(f"GARCH Volatility : {garch_vol:.2f}%")
 # Get the delta (key) from call_deltas_dict where strike is atm_strike
 atm_put_delta = next((delta for delta, v in put_deltas_dict.items() if v['strike'] == atm_strike), None)
 
@@ -194,6 +203,7 @@ pred_put_iv_at_025 = intercept_put + slope_put * target_delta
 pred_call_iv_at_025 = intercept_call + slope_call * target_delta
 print(f"\nPredicted IV at delta={target_delta:.2f}: put={pred_put_iv_at_025:.2f}%, call={pred_call_iv_at_025:.2f}%")
 print(f"Predicted put - call at {target_delta}: {pred_put_iv_at_025 - pred_call_iv_at_025:.2f}%")
+
 
 # --- End of script ---
 

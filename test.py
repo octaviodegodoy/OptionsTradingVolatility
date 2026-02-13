@@ -5,6 +5,7 @@ from mt5_connector import MT5Connector
 import asyncio
 from datetime import datetime
 from scipy.optimize import newton, brentq
+from utils import Utils
 
 class BlackScholesIV:
     """
@@ -28,6 +29,7 @@ class BlackScholesIV:
         self.T = T
         self.r = r
         self.q = q
+        self.utils = Utils()
         
     def _d1(self, sigma):
         """Calculate d1 parameter"""
@@ -304,7 +306,7 @@ async def get_options_names(symbol_y="VALE3"):
                print(f"Option: {option_symbol}, Bid: {bid:.2f}, Ask: {ask:.2f}, Avg: {avg_price:.2f}")
     return values, spot_data
 
-asyncio.run(place_order_test())
+asyncio.run(Utils().get_calls_and_puts_data())
 
 # Example Usage
 """
