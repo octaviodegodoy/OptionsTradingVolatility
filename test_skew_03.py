@@ -79,6 +79,7 @@ mt5_conn = MT5Connector()
 utils = Utils()
 quant_calc = QuantCalculation()
 
+
 asset_symbol = ASSET_SYMBOL[0]
 spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL[0], mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
 garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
@@ -105,10 +106,9 @@ print(f"ATM strike determined from available strikes: {atm_strike}")
 atm_strikes = sorted_strikes[max(0, sorted_strikes.index(atm_strike)-1):sorted_strikes.index(atm_strike)+1]
 print(f"ATM strikes: {atm_strikes}")
 print(f"GARCH Volatility : {garch_vol:.2f}%")
-diff_iv_garch_puts = [(v['strike'], v['iv'] - garch_vol) for v in put_deltas_dict.values() if v['strike'] in atm_strikes]
-min_diff_iv_garch_puts = min(diff_iv_garch_puts, key=lambda x: abs(x[1]))
-min_diff_iv_garch_puts_result = min_diff_iv_garch_puts[1]
-print(f"Difference between put IVs and GARCH volatility at ATM strikes: {diff_iv_garch_puts} min difference: {min_diff_iv_garch_puts_result}")
+iv_atm_puts = [(v['strike'], v['iv']) for v in put_deltas_dict.values() if v['strike'] in atm_strikes]
+print(f"ATM puts strikes and IVs: {iv_atm_puts}")
+
 
 # Get the delta (key) from call_deltas_dict where strike is atm_strike
 atm_put_delta = next((delta for delta, v in put_deltas_dict.items() if v['strike'] == atm_strike), None)
@@ -198,9 +198,11 @@ print("="*60)
 
 
 result = are_puts_steeper(delta_puts, put_list_all, delta_calls, call_list, min_diff_pp_per_delta=STEEP_THRESHOLD)
-print(f"Threshold = {STEEP_THRESHOLD:.2f} pp/delta: Puts steeper? {result} and min IV at ATM puts is {min_diff_iv_garch_puts_result:.2f} pp different from GARCH volatility (threshold was {DIFF_IV_GARCH_PUTS_THRESHOLD_PCT} pp)")
-result_iv_threshold = min_diff_iv_garch_puts_result - DIFF_IV_GARCH_PUTS_THRESHOLD_PCT
-print(f"Result for IV difference threshold: {result_iv_threshold:.2f} pp difference between put IV and GARCH volatility at ATM strikes (threshold was {DIFF_IV_GARCH_PUTS_THRESHOLD_PCT} pp)")
+
+
+#Get the mininum iv at ATM puts and compare to GARCH volatility
+min_put_delta_iv = min(puts_iv_sorted)
+
 # Example of predicted IV at a given delta (optional demonstration)
 target_delta = 0.25
 pred_put_iv_at_025 = intercept_put + slope_put * target_delta
