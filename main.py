@@ -6,11 +6,8 @@ from functions.black_scholes import BlackScholesCalculator
 from constants import ASSET_SYMBOL, DIFF_IV_GARCH_PUTS_THRESHOLD_PCT, GARCH_SAMPLE_SIZE, MIN_DAYS_TO_EXPIRY, STEEP_THRESHOLD, UNIX_DAYS_IN_SECONDS
 from mt5_connector import MT5Connector
 from functions.quant_functions import QuantCalculation
-from skew_strategy import SkewStrategy
 import pandas as pd
 import numpy as np
-
-from test_skew_03 import are_puts_steeper
 from utils import Utils
 
 
@@ -18,7 +15,6 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
     mt5_conn = MT5Connector()
-    black_scholes_calculator = BlackScholesCalculator()
     utils = Utils()
     
     # get garch volatility
@@ -30,56 +26,59 @@ async def main():
     # get options chain
     symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[0])
     chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[0])
-    logger.info(f"Options Chain for {ASSET_SYMBOL[0]} retrieved {chain_options.values()} options.")
+    logger.info(f"Options Chain for {ASSET_SYMBOL[0]} retrieved {len(chain_options.values())} options.")
     expiration_time = list(chain_options.keys())[0]
-    logger.info(f"Selected Expiration Time: {datetime.fromtimestamp(expiration_time)}")
-    calls_dict, puts_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
-    logger.info(f"Options Data Retrieved: calls {calls_dict}, puts {puts_dict}")
 
-    call_iv_dict = {k: v['iv'] for k, v in calls_dict.items()}
-    put_iv_dict = {k: v['iv'] for k, v in puts_dict.items()}
+    while True:
+       logger.info(f"Selected Expiration Time: {datetime.fromtimestamp(expiration_time)}")
+       calls_dict, puts_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
 
-    print(f"Put IV dict: {put_iv_dict}")
-
-    real_delta_calls = np.array(list(call_iv_dict.keys()))
-    real_delta_puts  = np.array(list(put_iv_dict.keys()))
-    real_iv_calls = np.array(list(call_iv_dict.values()))
-    real_iv_puts  = np.array(list(put_iv_dict.values()))
-    result = are_puts_steeper(real_delta_puts, real_iv_puts, real_delta_calls, real_iv_calls, min_diff_pp_per_delta=STEEP_THRESHOLD)
-    
-    atm_price = (symbol_info.bid + symbol_info.ask) / 2
-    print(f"ATM strike price for {ASSET_SYMBOL[0]} is approximately {atm_price}")
-
-    put_strikes = [v['strike'] for v in puts_dict.values()]
-    put_strikes_and_ivs = [(v['strike'], v['iv']) for v in puts_dict.values()]
-    put_strikes = set(put_strikes)
-    sorted_strikes = sorted(put_strikes)
-    print(f"All put strikes : {sorted(put_strikes)}")
-    atm_strike = min(sorted_strikes, key=lambda x: abs(x - atm_price))
-
-    print(f"ATM strike determined from available strikes: {atm_strike}")
-    atm_strikes = sorted_strikes[max(0, sorted_strikes.index(atm_strike)-1):sorted_strikes.index(atm_strike)+1]
-    print(f"ATM strikes: {atm_strikes}")
-
-    atm_ivs = [(iv, strike) for strike, iv in put_strikes_and_ivs if strike in atm_strikes]
-    print(f"ATM IVs: {atm_ivs}")
-
-    min_iv_strike = min(atm_ivs, key=lambda x: x[0])
-    print(f"Strike with minimum IV: {min_iv_strike[1]}, IV: {min_iv_strike[0]} and puts steeper? {result} and min IV at ATM puts is {min_iv_strike[0]:.2f}% different from GARCH volatility (threshold was {DIFF_IV_GARCH_PUTS_THRESHOLD_PCT} pp)")
-    put_name_min_iv = next((v['option_name'] for v in puts_dict.values() if v['strike'] == min_iv_strike[1]), None)
-    print(f"Put option with minimum IV at ATM strikes: {put_name_min_iv}")
-    #F = utils.get_factor_from_expiration_time(expiration_time)
-    #logger.info(f"Tenor Factor from utils function: {F}")
-    #T = utils.get_tenor(expiration_time)
-    #logger.info(f"Tenor is: {T} weekdays to expiry. and expiration time is {datetime.fromtimestamp(expiration_time)}")
-    #r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
-    #logger.info(f"Interest Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
-    
+       if not calls_dict or not puts_dict:
+           logger.warning("calls_dict or puts_dict is empty, skipping iteration")
+           await asyncio.sleep(15)
+           continue
+       
+       logger.info(f"Options Data Retrieved: calls {calls_dict}, puts {puts_dict}")
    
+       call_iv_dict = {k: v['iv'] for k, v in calls_dict.items()}
+       put_iv_dict = {k: v['iv'] for k, v in puts_dict.items()}
    
-
-
+       print(f"Put IV dict: {put_iv_dict}")
+   
+       real_delta_calls = np.array(list(call_iv_dict.keys()))
+       real_delta_puts  = np.array(list(put_iv_dict.keys()))
+       real_iv_calls = np.array(list(call_iv_dict.values()))
+       real_iv_puts  = np.array(list(put_iv_dict.values()))
+       result = quant_calc.are_puts_steeper(real_delta_puts, real_iv_puts, real_delta_calls, real_iv_calls, min_diff_pp_per_delta=STEEP_THRESHOLD)
+       
+       atm_price = (symbol_info.bid + symbol_info.ask) / 2
+       print(f"ATM strike price for {ASSET_SYMBOL[0]} is approximately {atm_price}")
+   
+       put_strikes = [v['strike'] for v in puts_dict.values()]
+       put_strikes_and_ivs = [(v['strike'], v['iv']) for v in puts_dict.values()]
+       put_strikes = set(put_strikes)
+       sorted_strikes = sorted(put_strikes)
+       print(f"All put strikes : {sorted(put_strikes)}")
+       atm_strike = min(sorted_strikes, key=lambda x: abs(x - atm_price))
+   
+       print(f"ATM strike determined from available strikes: {atm_strike}")
+       atm_strikes = sorted_strikes[max(0, sorted_strikes.index(atm_strike)-1):sorted_strikes.index(atm_strike)+1]
+       print(f"ATM strikes: {atm_strikes}")
+   
+       atm_ivs = [(iv, strike) for strike, iv in put_strikes_and_ivs if strike in atm_strikes]
+       print(f"ATM IVs: {atm_ivs}")
+   
+       min_iv_strike = min(atm_ivs, key=lambda x: x[0])
+       print(f"Strike with minimum IV: {min_iv_strike[1]}, IV: {min_iv_strike[0]} and puts steeper? {result} and min IV at ATM puts is {min_iv_strike[0]:.2f}% different from GARCH volatility (threshold was {DIFF_IV_GARCH_PUTS_THRESHOLD_PCT} pp)")
+       put_name_min_iv = next((v['option_name'] for v in puts_dict.values() if v['strike'] == min_iv_strike[1]), None)
+       print(f"Put option with minimum IV at ATM strikes: {put_name_min_iv}")
+       #F = utils.get_factor_from_expiration_time(expiration_time)
+       #logger.info(f"Tenor Factor from utils function: {F}")
+       #T = utils.get_tenor(expiration_time)
+       #logger.info(f"Tenor is: {T} weekdays to expiry. and expiration time is {datetime.fromtimestamp(expiration_time)}")
+       #r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
+       #logger.info(f"Interest Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
+       await asyncio.sleep(5)    
     
-    await asyncio.sleep(5)
 
 asyncio.run(main())
