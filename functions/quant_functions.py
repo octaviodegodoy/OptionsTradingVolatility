@@ -93,7 +93,7 @@ class QuantCalculation:
             return None
         
 
-    def are_puts_steeper(delta_puts, put_ivs, delta_calls, call_ivs, min_diff_pp_per_delta=0.0):
+    def are_puts_steeper(self,delta_puts, put_ivs, delta_calls, call_ivs, min_diff_pp_per_delta=0.0):
         """
         Check if put IVs have a steeper slope than call IVs when fitted linearly.
         
@@ -120,8 +120,7 @@ class QuantCalculation:
             - Steeper means larger absolute slope value (more negative)
         """
         # Handle data length mismatch (drop extra IVs if needed)
-    
-    
+        
         put_ivs = put_ivs[:len(delta_puts)]
         
         # Convert put deltas to absolute values

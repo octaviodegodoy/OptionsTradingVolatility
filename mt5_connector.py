@@ -31,6 +31,37 @@ class MT5Connector:
             df = df[df['time'].dt.weekday < 5]  # 0=Monday, ..., 4=Friday
             return df   
 
+    def place_order(self, symbol, order_type, volume, price, deviation, comment):
+        symbol_info = mt5.symbol_info(symbol)
+        if symbol_info is None:
+            print(f"Symbol {symbol} not found")
+            return
+        
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": volume,
+            "type": order_type,
+            "price": price,
+            "sl": 0.0,
+            "tp": 0.0,
+            "deviation": deviation,
+            "magic": MAGIC_NUMBER,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        
+        result = mt5.order_send(request)
+
+        if result is None:
+            print(f"Order send failed, error: {mt5.last_error()}")
+        else:
+            print(f"Order send result: retcode={result.retcode}, comment={result.comment}")
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                print(f"Order executed successfully! Order: {result.order}, Deal: {result.deal}")
+            else:
+                print(f"Order failed: {result.comment}")
 
     def place_order_vertical(self,symbolY,symbolX,orders_type,volume,iv_y,iv_x):
         print(f"Placing vertical order...{symbolY}, {symbolX}, {orders_type}, {volume}, {iv_y}, {iv_x}")
