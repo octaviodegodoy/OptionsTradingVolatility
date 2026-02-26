@@ -19,17 +19,19 @@ async def main():
     
     # get garch volatility
     quant_calc = QuantCalculation()
-    spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL[0], mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
-    garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
-    logger.info(f"GARCH Volatility : {garch_vol:.2f}%")
+   
 
     # get options chain
-    symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[0])
-    chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[0])
-    logger.info(f"Options Chain for {ASSET_SYMBOL[0]} retrieved {len(chain_options.values())} options.")
+    symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
+    chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[2])
+    logger.info(f"Options Chain for {ASSET_SYMBOL[2]} retrieved {len(chain_options.values())} options.")
     expiration_time = list(chain_options.keys())[0]
 
     while True:
+       spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL[2], mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
+       garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
+       logger.info(f"GARCH Volatility : {garch_vol:.2f}%")
+
        logger.info(f"Selected Expiration Time: {datetime.fromtimestamp(expiration_time)}")
        calls_dict, puts_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
 
@@ -53,7 +55,7 @@ async def main():
        result = quant_calc.are_puts_steeper(real_delta_puts, real_iv_puts, real_delta_calls, real_iv_calls, STEEP_THRESHOLD)
        
        atm_price = (symbol_info.bid + symbol_info.ask) / 2
-       print(f"ATM strike price for {ASSET_SYMBOL[0]} is approximately {atm_price}")
+       print(f"ATM strike price for {ASSET_SYMBOL[2]} is approximately {atm_price}")
    
        put_strikes = [v['strike'] for v in puts_dict.values()]
        put_strikes_and_ivs = [(v['strike'], v['iv']) for v in puts_dict.values()]
@@ -70,20 +72,59 @@ async def main():
        print(f"ATM IVs: {atm_ivs}")
    
        min_iv_strike = min(atm_ivs, key=lambda x: x[0])
-       print(f"Strike with minimum IV: {min_iv_strike[1]}, IV: {min_iv_strike[0]} and puts steeper? {result} and min IV at ATM puts is {min_iv_strike[0]:.2f}% different from GARCH volatility (threshold was {DIFF_IV_GARCH_PUTS_THRESHOLD_PCT} pp)")
+       iv_garch_diff_pct = min_iv_strike[0] - garch_vol
+       print(f"Strike with minimum IV: {min_iv_strike[1]}, IV: {min_iv_strike[0]} and GARCH volatility: {garch_vol:.2f}% and puts steeper? {result} and min IV at ATM puts is {iv_garch_diff_pct:.2f}% different from GARCH volatility (threshold was {DIFF_IV_GARCH_PUTS_THRESHOLD_PCT} pp)")
        put_name_min_iv = next((v['option_name'] for v in puts_dict.values() if v['strike'] == min_iv_strike[1]), None)
+       ## verify put side steepness and if IV of ATM puts is significantly lower than GARCH volatility
        print(f"Put option with minimum IV at ATM strikes: {put_name_min_iv} and steep threshold is {STEEP_THRESHOLD} pp/delta")
-       if result:
+       if iv_garch_diff_pct <= 0.0:
               logger.info(f"Puts are steeper than calls with a slope difference of at least {STEEP_THRESHOLD} pp/delta.")
-              symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[0])
+              symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
               mt5_conn.place_order(put_name_min_iv,MT5Connector.ORDER_TYPE_BUY, 100.0, symbol_info.ask, 10, str(min_iv_strike[0]))
+              break
+       
+
+       print(f"Real deltas for calls: {real_delta_calls}")
+       avg_call_delta = sum(real_delta_calls) / len(real_delta_calls)
+       std_call_delta = (sum((x - avg_call_delta) ** 2 for x in real_delta_calls) / len(real_delta_calls)) ** 0.5
+
+       # Find closest deltas to ±1 std from mean
+       lower_bound = avg_call_delta - std_call_delta
+       upper_bound = avg_call_delta + std_call_delta
+       closest_lower = min([d for d in real_delta_calls if d > 0.25], key=lambda x: abs(x - lower_bound), default=None)
+       closest_upper = min([d for d in real_delta_calls if d < 0.75], key=lambda x: abs(x - upper_bound), default=None)
+     
+       # Calculate IV difference
+ 
+       if closest_lower is not None and closest_upper is not None:
+            iv_upper = calls_dict[closest_upper]['iv']
+            iv_lower = calls_dict[closest_lower]['iv']
+            iv_diff = iv_lower - iv_upper 
+       else:
+            iv_diff = None
+
+       print(f"IV call diff: {iv_diff:.2f} iv upper {iv_upper:.2f} at delta {closest_upper} iv lower {iv_lower:.2f} at delta {closest_lower}" if iv_diff is not None else "N/A (IV difference)")
+    
+       call_buy = calls_dict[closest_upper]['option_name']
+       call_sell = calls_dict[closest_lower]['option_name']
+       orders_type = [mt5_conn.ORDER_TYPE_BUY, mt5_conn.ORDER_TYPE_SELL] # or "SELL"
+       
+       if iv_diff is not None and iv_diff <= 0.0:
+            print(f"Placing orders for call spread: Buy {call_buy} and Sell {call_sell} and IV difference is {iv_diff:.2f}% which is less than or equal to 0.0%")
+            mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, 10000.0, iv_upper, iv_lower)
+       
+       
+       """    
+       print(f"Average Call Delta: {avg_call_delta:.2f} ± {std_call_delta:.2f} delta diff {call_delta_diff:.2f}")
+       print(f"Closest existing deltas: Lower={closest_lower:.2f} option name {real_delta_calls[closest_lower]['option_name']} with (IV={real_delta_calls[closest_lower]['iv']:.2f}%), Upper={closest_upper:.2f} and option name {real_delta_calls[closest_upper]['option_name']}  with (IV={real_delta_calls[closest_upper]['iv']:.2f}%) diff IV={iv_diff:.2f}%" if iv_diff is not None else "N/A  (IV difference)")
+       """ 
        #F = utils.get_factor_from_expiration_time(expiration_time)
        #logger.info(f"Tenor Factor from utils function: {F}")
        #T = utils.get_tenor(expiration_time)
        #logger.info(f"Tenor is: {T} weekdays to expiry. and expiration time is {datetime.fromtimestamp(expiration_time)}")
        #r = black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
        #logger.info(f"Interest Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
-       await asyncio.sleep(5)    
+       await asyncio.sleep(25)    
     
 
 asyncio.run(main())
