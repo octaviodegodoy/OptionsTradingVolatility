@@ -306,7 +306,16 @@ async def get_options_names(symbol_y="VALE3"):
                print(f"Option: {option_symbol}, Bid: {bid:.2f}, Ask: {ask:.2f}, Avg: {avg_price:.2f}")
     return values, spot_data
 
-asyncio.run(Utils().get_calls_and_puts_data())
+async def get_positions_test():
+    mt5_conn = MT5Connector()
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        return None
+    positions = mt5_conn.get_open_positions()
+    print(f"Current open positions: {positions}")
+    return positions
+
+asyncio.run(get_positions_test())
 
 # Example Usage
 """

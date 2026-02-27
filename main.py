@@ -72,12 +72,16 @@ async def main():
        print(f"ATM IVs: {atm_ivs}")
    
        min_iv_strike = min(atm_ivs, key=lambda x: x[0])
+       put_atm_delta = next((v['delta'] for v in puts_dict.values() if v['strike'] == min_iv_strike[1]), None)
        iv_garch_diff_pct = min_iv_strike[0] - garch_vol
        print(f"Strike with minimum IV: {min_iv_strike[1]}, IV: {min_iv_strike[0]} and GARCH volatility: {garch_vol:.2f}% and puts steeper? {result} and min IV at ATM puts is {iv_garch_diff_pct:.2f}% different from GARCH volatility (threshold was {DIFF_IV_GARCH_PUTS_THRESHOLD_PCT} pp)")
        put_name_min_iv = next((v['option_name'] for v in puts_dict.values() if v['strike'] == min_iv_strike[1]), None)
        ## verify put side steepness and if IV of ATM puts is significantly lower than GARCH volatility
        print(f"Put option with minimum IV at ATM strikes: {put_name_min_iv} and steep threshold is {STEEP_THRESHOLD} pp/delta")
-       if iv_garch_diff_pct <= 0.0:
+      
+       put_condition = iv_garch_diff_pct <= DIFF_IV_GARCH_PUTS_THRESHOLD_PCT or result
+
+       if put_condition:
               logger.info(f"Puts are steeper than calls with a slope difference of at least {STEEP_THRESHOLD} pp/delta.")
               symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
               mt5_conn.place_order(put_name_min_iv,MT5Connector.ORDER_TYPE_BUY, 100.0, symbol_info.ask, 10, str(min_iv_strike[0]))
@@ -108,12 +112,23 @@ async def main():
        call_buy = calls_dict[closest_upper]['option_name']
        call_sell = calls_dict[closest_lower]['option_name']
        orders_type = [mt5_conn.ORDER_TYPE_BUY, mt5_conn.ORDER_TYPE_SELL] # or "SELL"
+
+       call_condition = iv_diff is not None and iv_diff <= 0.0
+
+       min_amount = 100.0
+       put_amount = round(min_amount/put_atm_delta / min_amount, 0) * min_amount if put_atm_delta is not None and put_atm_delta != 0 else min_amount
+       call_delta = closest_upper - closest_lower if closest_upper is not None and closest_lower is not None else 0 
+       call_amount = round(min_amount/call_delta,0)*min_amount # adjust call amount based on delta difference to maintain a more balanced position
+           
        
-       if iv_diff is not None and iv_diff <= 0.0:
+       if put_condition and call_condition:
+            logger.info(f"Puts are steeper than calls with a slope difference of at least {STEEP_THRESHOLD} pp/delta.")
+            symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
+            mt5_conn.place_order(put_name_min_iv,MT5Connector.ORDER_TYPE_BUY, put_amount, symbol_info.ask, 10, str(min_iv_strike[0]))
             print(f"Placing orders for call spread: Buy {call_buy} and Sell {call_sell} and IV difference is {iv_diff:.2f}% which is less than or equal to 0.0%")
-            mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, 10000.0, iv_upper, iv_lower)
-       
-       
+            mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, call_amount, iv_upper, iv_lower)
+            
+
        """    
        print(f"Average Call Delta: {avg_call_delta:.2f} ± {std_call_delta:.2f} delta diff {call_delta_diff:.2f}")
        print(f"Closest existing deltas: Lower={closest_lower:.2f} option name {real_delta_calls[closest_lower]['option_name']} with (IV={real_delta_calls[closest_lower]['iv']:.2f}%), Upper={closest_upper:.2f} and option name {real_delta_calls[closest_upper]['option_name']}  with (IV={real_delta_calls[closest_upper]['iv']:.2f}%) diff IV={iv_diff:.2f}%" if iv_diff is not None else "N/A  (IV difference)")
