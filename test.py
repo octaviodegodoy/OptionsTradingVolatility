@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.stats import norm
-from constants import CALL_OPTION, PERIODS
+from constants import ASSET_SYMBOL, CALL_OPTION, PERIODS
 from mt5_connector import MT5Connector
 import asyncio
 from datetime import datetime
@@ -282,89 +282,27 @@ async def close_all_positions_test():
         return  
     mt5_conn.close_all_positions()
 
-async def get_options_names(symbol_y="VALE3"):
+async def get_options_names():
     mt5_conn = MT5Connector()
-    if not mt5_conn.initialize():
-        print("MT5 initialization failed")
-        return None, None
-    symbol_y = "VALE3"
-    spot_data = mt5_conn.get_data(symbol_y,mt5_conn.TIMEFRAME_D1, PERIODS, 0)
-    if spot_data is None:
-        print("Failed to get historical data")
-    else:
-        print(f"Retrieved {spot_data.head(1)} for {symbol_y}")
-
-    values = mt5_conn.get_options_chain("VALE*")
-
-    for option_symbol in values:
-        symbol_info=mt5_conn.get_symbol_info(option_symbol)
-        if symbol_info!=None:
-           ask = symbol_info.ask
-           bid = symbol_info.bid
-           if ask > 0.0 and bid > 0.0:
-               avg_price = (ask + bid) / 2
-               print(f"Option: {option_symbol}, Bid: {bid:.2f}, Ask: {ask:.2f}, Avg: {avg_price:.2f}")
-    return values, spot_data
-
-async def get_positions_test():
-    mt5_conn = MT5Connector()
+    utils = Utils()
     if not mt5_conn.initialize():
         print("MT5 initialization failed")
         return None
-    positions = mt5_conn.get_open_positions()
-    print(f"Current open positions: {positions}")
-    return positions
+    chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[2])
+    print(f"Options names for {ASSET_SYMBOL[2]}: {chain_options}")
+    expiration_time = list(chain_options.keys())[0]
+    print(f"Expiration time for options: {datetime.fromtimestamp(expiration_time)}")
+    selected_asset = mt5_conn.symbol_select(ASSET_SYMBOL[2],True)
+    if not selected_asset:
+        print(f"Failed to select {ASSET_SYMBOL[2]}")
+        return None
+    symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
 
-asyncio.run(get_positions_test())
+    if symbol_info is None:
+        print(f"Failed to get symbol info for {ASSET_SYMBOL[2]}")
+        return None
+    calls_dict, puts_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
+    print(f"Calls data: {calls_dict}")
+    print(f"Puts data: {puts_dict}")
 
-# Example Usage
-"""
-if __name__ == "__main__":
-
-    mt5_conn = MT5Connector()
-    underlying_symbol = "BOVA11"
-    if not mt5_conn.initialize():
-        print("MT5 initialization failed")
-        exit()  
-
-    spot_data = mt5_conn.get_symbol_info(underlying_symbol)
-    spot_price = (spot_data.ask + spot_data.bid) / 2 if spot_data else None
-
-    print(f"Current spot price for {underlying_symbol}: {spot_price}")
-    if spot_data is None:
-        print("Failed to get historical data")
-        exit()
-    else:
-        print(f"Retrieved price {spot_price} for {underlying_symbol}") 
-
-    
-    data = mt5_conn.get_options_chain("PETR*", CALL_OPTION)
-    print("\n" + "=" * 70)
-    print("FETCHING OPTIONS CHAIN FOR PETR*")
-    option_data = data[0] if data else None
-    print(f"First Option Data: {option_data}")
-    option_details = mt5_conn.get_symbol_info(option_data) if option_data else None
-    print(f"Option Details: {option_details}")
-
-    print("\n" + "=" * 70)
-    print("EXAMPLE 1: Single Option IV and Delta Calculation")
-    print("=" * 70)
-
-    # Market parameters
-    S = spot_price         # Current stock price
-    K = 33.5         # Strike price
-    T = 0.11        # 28 dias to expiration
-    r = 0.149        # 14.9% risk-free rate
-    q = 0.0        # 0% dividend yield
-    market_price = 2.56  # Observed call option price
-
-    # Create an instance of the BlackScholesIV class
-    bs_iv = BlackScholesIV(S=S, K=K, T=T, r=r, q=q)
-
-    # Calculate implied volatility
-    implied_vol = bs_iv.implied_volatility(market_price)
-    delta = bs_iv.call_delta(implied_vol)
-    vega = bs_iv.vega(implied_vol)
-
-    print(f"Implied volatility: {implied_vol:.4f}, Delta: {delta:.4f}, Vega: {vega:.4f}")
-"""
+asyncio.run(get_options_names())

@@ -72,44 +72,57 @@ class Utils:
         logging.info(f"Calculating IVs and Deltas for options with T={T} weekdays to expiry. and factor={factor:.6f} ")
         asset_bid = symbol_info.bid
         asset_ask = symbol_info.ask
+        self.logger.info(f"Underlying market price: {(asset_bid + asset_ask) / 2:.2f} (bid: {asset_bid:.2f}, ask: {asset_ask:.2f})")
         asset_market_price = (asset_bid + asset_ask) / 2
         F = asset_market_price / factor
+        self.logger.info(f"Forward price F : {F:.2f} and underlying market price: {asset_market_price:.2f}")
 
         options_names_list = chain_options[list(chain_options.keys())[0]]
+        
         for option_name in options_names_list:
-            option_info = self.mt5_conn.get_symbol_info(option_name)
             selected_option = self.mt5_conn.symbol_select(option_name,True)
+            option_info = self.mt5_conn.get_symbol_info(option_name)
+            
+            if not selected_option:
+                self.logger.error(f"Failed to select option {option_name}")
+                continue
+            if option_info is None or option_info.bid == 0.0 or option_info.ask == 0.0:
+                continue
 
-            if not selected_option: 
-                print(f"Failed to select option {option_name}") 
-            else:
-                option_info = self.mt5_conn.get_symbol_info(option_name)
-
-                if option_info is None:
-                    print(f"Failed to get info for option {option_name}")
-                    continue
-                if not self.selection_condition(option_info, symbol_info):
-                    continue
-                K = option_info.option_strike
-
-                bid_option_price = option_info.bid
-                ask_option_price = option_info.ask
-                option_market_price = (bid_option_price + ask_option_price)/2
-                K = option_info.option_strike
-                option_type = option_info.option_right  # 0 for call, 1 for put
-                
-                iv = self.black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, option_type)
-                delta = self.black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
-                iv_call_brentq = self.black_scholes_calculator.implied_vol(F, K, T, option_market_price, factor, option_type)
-                delta = round(delta, 2)
-                iv = iv * 100  # Convert to percentage
-                iv_call_brentq = iv_call_brentq * 100  # Convert to percentage
-
-                if option_type == CALL_OPTION:
-                    call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price, 'strike': K}
-                elif option_type == PUT_OPTION:
-                    put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price, 'strike': K}
+            bid_option_price = option_info.bid
+            ask_option_price = option_info.ask
+            option_market_price = (bid_option_price + ask_option_price)/2
+            K = option_info.option_strike
+            option_type = option_info.option_right  # 0 for call, 1 for put
+            iv = self.black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, option_type)
+            delta = self.black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
+            iv_call_brentq = self.black_scholes_calculator.implied_vol(F, K, T, option_market_price, factor, option_type)
+            delta = round(delta, 2)
+            iv = iv * 100  # Convert to percentage
+            iv_call_brentq = iv_call_brentq * 100  # Convert to percentage
+            if option_type == CALL_OPTION:
+                call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price, 'strike': K}
+            elif option_type == PUT_OPTION:
+                put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price, 'strike': K}
 
         return call_deltas_dict, put_deltas_dict
+        
+    def put_options_count(self):
+        count_put = 0
+        positions = self.mt5_conn.get_open_positions()
+        for pos in positions:
+            symbol_info = self.mt5_conn.get_symbol_info(pos.symbol)
+            if symbol_info is not None:
+                if symbol_info.option_right == PUT_OPTION:
+                    count_put += 1
+        return count_put
 
-
+    def call_options_count(self):
+        count_call = 0
+        positions = self.mt5_conn.get_open_positions()
+        for pos in positions:
+            symbol_info = self.mt5_conn.get_symbol_info(pos.symbol)
+            if symbol_info is not None:
+                if symbol_info.option_right == CALL_OPTION:
+                    count_call += 1
+        return count_call

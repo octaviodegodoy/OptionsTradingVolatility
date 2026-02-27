@@ -1,9 +1,7 @@
 from datetime import datetime, time
 import logging
 import asyncio
-import time
-from functions.black_scholes import BlackScholesCalculator
-from constants import ASSET_SYMBOL, DIFF_IV_GARCH_PUTS_THRESHOLD_PCT, GARCH_SAMPLE_SIZE, MIN_DAYS_TO_EXPIRY, STEEP_THRESHOLD, UNIX_DAYS_IN_SECONDS
+from constants import ASSET_SYMBOL, DIFF_IV_GARCH_PUTS_THRESHOLD_PCT, GARCH_SAMPLE_SIZE, IV_DIFF_THRESHOLD_CALLS, STEEP_THRESHOLD
 from mt5_connector import MT5Connector
 from functions.quant_functions import QuantCalculation
 import pandas as pd
@@ -22,12 +20,16 @@ async def main():
    
 
     # get options chain
+    selected_asset = mt5_conn.symbol_select(ASSET_SYMBOL[2], True)
+    if not selected_asset:
+        logger.error(f"Failed to select {ASSET_SYMBOL[2]}")
+        return None
     symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
     chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[2])
     logger.info(f"Options Chain for {ASSET_SYMBOL[2]} retrieved {len(chain_options.values())} options.")
     expiration_time = list(chain_options.keys())[0]
 
-    while True:
+    while selected_asset:
        spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL[2], mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
        garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
        logger.info(f"GARCH Volatility : {garch_vol:.2f}%")
@@ -39,13 +41,12 @@ async def main():
            logger.warning("calls_dict or puts_dict is empty, skipping iteration")
            await asyncio.sleep(15)
            continue
-       
-       logger.info(f"Options Data Retrieved: calls {calls_dict}, puts {puts_dict}")
    
        call_iv_dict = {k: v['iv'] for k, v in calls_dict.items()}
        put_iv_dict = {k: v['iv'] for k, v in puts_dict.items()}
    
        print(f"Put IV dict: {put_iv_dict}")
+       print(f"Call IV dict: {call_iv_dict}")
    
        real_delta_calls = np.array(list(call_iv_dict.keys()))
        real_delta_puts  = np.array(list(put_iv_dict.keys()))
@@ -72,7 +73,8 @@ async def main():
        print(f"ATM IVs: {atm_ivs}")
    
        min_iv_strike = min(atm_ivs, key=lambda x: x[0])
-       put_atm_delta = next((v['delta'] for v in puts_dict.values() if v['strike'] == min_iv_strike[1]), None)
+       put_atm_delta = next((k for k, v in puts_dict.items() if v['strike'] == min_iv_strike[1]), None)
+       print(f"Minimum IV at ATM strikes: {min_iv_strike[0]:.2f}% at strike {min_iv_strike[1]} with delta {put_atm_delta:.2f}")
        iv_garch_diff_pct = min_iv_strike[0] - garch_vol
        print(f"Strike with minimum IV: {min_iv_strike[1]}, IV: {min_iv_strike[0]} and GARCH volatility: {garch_vol:.2f}% and puts steeper? {result} and min IV at ATM puts is {iv_garch_diff_pct:.2f}% different from GARCH volatility (threshold was {DIFF_IV_GARCH_PUTS_THRESHOLD_PCT} pp)")
        put_name_min_iv = next((v['option_name'] for v in puts_dict.values() if v['strike'] == min_iv_strike[1]), None)
@@ -81,14 +83,8 @@ async def main():
       
        put_condition = iv_garch_diff_pct <= DIFF_IV_GARCH_PUTS_THRESHOLD_PCT or result
 
-       if put_condition:
-              logger.info(f"Puts are steeper than calls with a slope difference of at least {STEEP_THRESHOLD} pp/delta.")
-              symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
-              mt5_conn.place_order(put_name_min_iv,MT5Connector.ORDER_TYPE_BUY, 100.0, symbol_info.ask, 10, str(min_iv_strike[0]))
-              break
-       
+       print(f"Put condition for buying: {put_condition} (IV difference from GARCH: {iv_garch_diff_pct:.2f}% and puts steeper? {result})")       
 
-       print(f"Real deltas for calls: {real_delta_calls}")
        avg_call_delta = sum(real_delta_calls) / len(real_delta_calls)
        std_call_delta = (sum((x - avg_call_delta) ** 2 for x in real_delta_calls) / len(real_delta_calls)) ** 0.5
 
@@ -107,26 +103,35 @@ async def main():
        else:
             iv_diff = None
 
-       print(f"IV call diff: {iv_diff:.2f} iv upper {iv_upper:.2f} at delta {closest_upper} iv lower {iv_lower:.2f} at delta {closest_lower}" if iv_diff is not None else "N/A (IV difference)")
+       print(f"IV call diff: {iv_diff:.2f} iv upper {iv_upper:.2f} and strike {calls_dict[closest_upper]['strike']} at delta {closest_upper} iv lower {iv_lower:.2f} at delta {closest_lower} and strike {calls_dict[closest_lower]['strike']}" if iv_diff is not None else "N/A (IV difference)")
     
        call_buy = calls_dict[closest_upper]['option_name']
        call_sell = calls_dict[closest_lower]['option_name']
        orders_type = [mt5_conn.ORDER_TYPE_BUY, mt5_conn.ORDER_TYPE_SELL] # or "SELL"
 
-       call_condition = iv_diff is not None and iv_diff <= 0.0
+       call_condition = iv_diff is not None and iv_diff <= IV_DIFF_THRESHOLD_CALLS
 
-       min_amount = 100.0
-       put_amount = round(min_amount/put_atm_delta / min_amount, 0) * min_amount if put_atm_delta is not None and put_atm_delta != 0 else min_amount
+       min_amount = 100
+       put_atm_delta = abs(put_atm_delta) if put_atm_delta is not None else 0.0
+       put_amount = float(round(min_amount/put_atm_delta/min_amount)*min_amount if put_atm_delta is not None and put_atm_delta != 0 else min_amount)
        call_delta = closest_upper - closest_lower if closest_upper is not None and closest_lower is not None else 0 
-       call_amount = round(min_amount/call_delta,0)*min_amount # adjust call amount based on delta difference to maintain a more balanced position
+       call_amount = float(round(min_amount/call_delta/min_amount)*min_amount if call_delta != 0 else min_amount) # adjust call amount based on delta difference to maintain a more balanced position
            
-       
+       puts_positions_total = utils.put_options_count()
+       print(f"Current open put positions: {puts_positions_total}")
+       call_positions_total = utils.call_options_count()
+       print(f"Current open call positions: {call_positions_total}")
+
+       print(f"Calculated call amount based on delta difference: {call_amount} (delta difference: {call_delta:.2f}) and put amount based on ATM put delta: {put_amount} (ATM put delta: {put_atm_delta:.2f})")
        if put_condition and call_condition:
             logger.info(f"Puts are steeper than calls with a slope difference of at least {STEEP_THRESHOLD} pp/delta.")
             symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
             mt5_conn.place_order(put_name_min_iv,MT5Connector.ORDER_TYPE_BUY, put_amount, symbol_info.ask, 10, str(min_iv_strike[0]))
             print(f"Placing orders for call spread: Buy {call_buy} and Sell {call_sell} and IV difference is {iv_diff:.2f}% which is less than or equal to 0.0%")
             mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, call_amount, iv_upper, iv_lower)
+            break
+       else:
+            logger.info(f"Conditions not met for placing orders. Put condition: {put_condition} (IV difference from GARCH: {iv_garch_diff_pct:.2f}% and puts steeper? {result}), Call condition: {call_condition} (IV difference between call strikes: {iv_diff:.2f}%)")
             
 
        """    
