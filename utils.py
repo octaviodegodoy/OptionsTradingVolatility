@@ -32,15 +32,12 @@ class Utils:
         T = self.get_tenor(expiration_time)
         # get r interest rate
         r = self.black_scholes_calculator.get_interpolated_rate(pd.to_datetime(expiration_time, unit='s'))
-        self.logger.info(f"Interest Rate for {datetime.fromtimestamp(expiration_time).date()}: {r}")
         factor = (r/100+1)**((-T)/252)
-        self.logger.info(f"Factor : {factor}")
         return factor,T
 
     def get_tenor(self, expiration_time):
         time_now = int(time.time())
-        total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS
-        logging.info(f"Total Days to Expiry: {total_days}")    
+        total_days = (expiration_time - time_now)/ UNIX_DAYS_IN_SECONDS  
         T = self.count_weekdays(datetime.fromtimestamp(time_now), int(total_days))
         return T
     
@@ -126,3 +123,32 @@ class Utils:
                 if symbol_info.option_right == CALL_OPTION:
                     count_call += 1
         return count_call
+    
+    def get_total_put_deltas(self):
+        total_deltas = 0
+        positions = self.mt5_conn.get_open_positions()
+        print(f"Calculating total put deltas from open positions. Total open positions: {len(positions)}")  
+        for pos in positions:
+            asset_symbol_info = self.mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
+            bid_asset_price = asset_symbol_info.bid
+            ask_asset_price = asset_symbol_info.ask
+            asset_market_price = (bid_asset_price + ask_asset_price) / 2
+            symbol_info = self.mt5_conn.get_symbol_info(pos.symbol)
+            expiration_time = symbol_info.expiration_time
+            factor,T = self.get_factor_from_expiration_time(expiration_time)
+            bid_option_price = symbol_info.bid
+            ask_option_price = symbol_info.ask
+            option_market_price = (bid_option_price + ask_option_price)/2
+            option_type = symbol_info.option_right
+            K = symbol_info.option_strike
+            F = asset_market_price / factor
+            iv = self.black_scholes_calculator.fx_vol(F, K, T, option_market_price, factor, option_type)
+            delta = self.black_scholes_calculator.fx_delta(F, K, T, iv, factor, option_type, asset_market_price)
+            if pos.type == self.mt5_conn.ORDER_TYPE_SELL and option_type == CALL_OPTION:
+                delta = -delta  # Negate delta for short positions
+            elif pos.type == self.mt5_conn.ORDER_TYPE_SELL and option_type == PUT_OPTION:
+                delta = -delta  # Negate delta for short put positions
+            print(f"Position: {pos.symbol}, Type: {'Put' if option_type == PUT_OPTION else 'Call'}, Delta: {delta:.2f}, Volume: {pos.volume} position type {'Sell' if pos.type == self.mt5_conn.ORDER_TYPE_SELL else 'Buy'}")
+            total_deltas += delta * pos.volume
+        
+        return total_deltas

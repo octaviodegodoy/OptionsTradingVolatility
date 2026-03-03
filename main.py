@@ -125,20 +125,21 @@ async def main():
        put_order_allowed = puts_positions_total == 0 and put_condition
        call_order_allowed = call_positions_total < 2 and call_condition
 
-       if put_order_allowed:
-          print(f"Placing order for put option {put_name_min_iv} with amount {put_amount} based on ATM put delta {put_atm_delta:.2f} and IV difference from GARCH {iv_garch_diff_pct:.2f}%") 
+       print(f"Checking order for put option {put_name_min_iv} with amount {put_amount} based on ATM put delta {put_atm_delta:.2f} steep {result} and IV difference from GARCH {iv_garch_diff_pct:.2f}%") 
+
+       if put_order_allowed:          
           logger.info(f"Puts are steeper than calls with a slope difference of at least {STEEP_THRESHOLD} pp/delta.")
           symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
           mt5_conn.place_order(put_name_min_iv,MT5Connector.ORDER_TYPE_BUY, put_amount, symbol_info.ask, 10, str(min_iv_strike[0]))
        else:
           logger.info(f"Condition not met for put condition: {put_condition} (IV difference from GARCH: {iv_garch_diff_pct:.2f}% and puts steeper? {result})")
 
-       print(f"Calculated call amount based on delta difference: {call_amount} (delta difference: {call_delta:.2f}) and put amount based on ATM put delta: {put_amount} (ATM put delta: {put_atm_delta:.2f})")
+       print(f"Calculated call amount based on delta difference: {call_amount} (delta difference: {call_delta:.2f}) for call option name {call_buy} at delta {closest_upper} and call option name {call_sell} at delta {closest_lower} with IV difference between strikes of {iv_diff:.2f}%")
        if call_order_allowed:
-            print(f"Placing orders for call spread: Buy {call_buy} and Sell {call_sell} and IV difference is {iv_diff:.2f}% which is less than or equal to 0.0%")
+            print(f"Placing orders for call spread: Buy {call_buy} and Sell {call_sell} and IV difference is {iv_diff:.2f}% which is less than or equal to {IV_DIFF_THRESHOLD_CALLS}%")
             mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, call_amount, iv_upper, iv_lower)
        else:
-            logger.info(f"Condition not met for call condition: {call_condition} (IV difference between call strikes: {iv_diff:.2f}%)")
+            logger.info(f"Condition not met for call condition: {call_condition} diff threshold is {IV_DIFF_THRESHOLD_CALLS} (IV difference between call strikes: {iv_diff:.2f}%)")
             
 
        """    

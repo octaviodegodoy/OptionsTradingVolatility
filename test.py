@@ -305,4 +305,13 @@ async def get_options_names():
     print(f"Calls data: {calls_dict}")
     print(f"Puts data: {puts_dict}")
 
-asyncio.run(get_options_names())
+async def get_total_put_deltas():
+    mt5_conn = MT5Connector()
+    utils = Utils()
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        return None
+    total_deltas = utils.get_total_put_deltas()
+    print(f"Total put deltas from open positions: {total_deltas:.2f}")
+
+asyncio.run(get_total_put_deltas())
