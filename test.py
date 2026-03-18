@@ -1,10 +1,12 @@
 import numpy as np
 from scipy.stats import norm
-from constants import ASSET_SYMBOL, CALL_OPTION, PERIODS
+from functions.black_scholes import BlackScholesCalculator
+from constants import ASSET_SYMBOL, CALL_OPTION, GARCH_SAMPLE_SIZE, PERIODS
 from mt5_connector import MT5Connector
 import asyncio
-from datetime import datetime
+import time
 from scipy.optimize import newton, brentq
+from functions.quant_functions import QuantCalculation
 from utils import Utils
 
 class BlackScholesIV:
@@ -291,7 +293,7 @@ async def get_options_names():
     chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[2])
     print(f"Options names for {ASSET_SYMBOL[2]}: {chain_options}")
     expiration_time = list(chain_options.keys())[0]
-    print(f"Expiration time for options: {datetime.fromtimestamp(expiration_time)}")
+    print(f"Expiration time for options: {time.fromtimestamp(expiration_time)}")
     selected_asset = mt5_conn.symbol_select(ASSET_SYMBOL[2],True)
     if not selected_asset:
         print(f"Failed to select {ASSET_SYMBOL[2]}")
@@ -314,4 +316,49 @@ async def get_total_put_deltas():
     total_deltas = utils.get_total_put_deltas()
     print(f"Total put deltas from open positions: {total_deltas:.2f}")
 
-asyncio.run(get_total_put_deltas())
+async def compare_garch_iv_with_puts():
+    mt5_conn = MT5Connector()
+    quant_calc = QuantCalculation()
+    black_scholes_calculator = BlackScholesCalculator()
+    utils = Utils()
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        return None
+    symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
+    asset_market_price = (symbol_info.bid + symbol_info.ask) / 2
+    print(f"Symbol info for {ASSET_SYMBOL[2]}: {symbol_info.name}")
+    spot_prices_data = mt5_conn.get_data(ASSET_SYMBOL[2], mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
+    garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
+    print(f"GARCH Volatility : {garch_vol:.2f}%")
+    iv_condition = False
+    while not iv_condition:
+       option_name = "PETRC420"
+       selected_option = mt5_conn.symbol_select(option_name,True)
+       if not selected_option:
+           print(f"Failed to select option {option_name}")
+           return None
+       option_info = mt5_conn.get_symbol_info(option_name)
+       if option_info is None or option_info.bid == 0.0 or option_info.ask == 0.0:
+           print(f"Failed to get valid market data for option {option_name}")
+           return None
+       print(f"Option info for {option_name}: {option_info.name}, bid: {option_info.bid}, ask: {option_info.ask}")
+       option_market_price = (option_info.bid + option_info.ask)/2
+       K = option_info.option_strike
+       option_type = option_info.option_right  # 0 for call, 1 for put
+       expiration_time = option_info.expiration_time
+       factor,T = utils.get_factor_from_expiration_time(expiration_time)
+       F = asset_market_price / factor
+       iv_brentq = black_scholes_calculator.implied_vol(F, K, T, option_market_price, factor, option_type)
+       iv_brentq = iv_brentq*100  # Convert to percentage
+       iv_garch_diff = garch_vol - iv_brentq
+       iv_condition = iv_garch_diff > 0       
+       print(f"Implied Volatility for {option_name}: {iv_brentq:.2f}%")
+       if iv_brentq is not None:
+           print(f"Difference between GARCH IV and implied volatility for {option_name}: {iv_garch_diff:.2f}%")
+       if iv_condition:
+           print(f"GARCH IV is higher than implied volatility for {option_name} by {iv_garch_diff:.2f}%")
+           mt5_conn.place_order(option_name,MT5Connector.ORDER_TYPE_BUY, 500.0, symbol_info.ask, 10, str(iv_brentq))
+       time.sleep(15)
+
+
+asyncio.run(compare_garch_iv_with_puts())

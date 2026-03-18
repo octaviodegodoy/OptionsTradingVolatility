@@ -122,8 +122,8 @@ async def main():
        call_positions_total = utils.call_options_count()
        print(f"Current open call positions: {call_positions_total}")
 
-       put_order_allowed = puts_positions_total == 0 and put_condition
-       call_order_allowed = call_positions_total < 2 and call_condition
+       put_order_allowed = puts_positions_total < 2 and put_condition
+       call_order_allowed = call_positions_total < 6 and call_condition
 
        print(f"Checking order for put option {put_name_min_iv} with amount {put_amount} based on ATM put delta {put_atm_delta:.2f} steep {result} and IV difference from GARCH {iv_garch_diff_pct:.2f}%") 
 
@@ -139,7 +139,7 @@ async def main():
             print(f"Placing orders for call spread: Buy {call_buy} and Sell {call_sell} and IV difference is {iv_diff:.2f}% which is less than or equal to {IV_DIFF_THRESHOLD_CALLS}%")
             mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, call_amount, iv_upper, iv_lower)
        else:
-            logger.info(f"Condition not met for call condition: {call_condition} diff threshold is {IV_DIFF_THRESHOLD_CALLS} (IV difference between call strikes: {iv_diff:.2f}%)")
+            logger.info(f"Condition not met for call condition: {call_condition} diff threshold is {IV_DIFF_THRESHOLD_CALLS} (IV difference between call strikes: {iv_diff:.2f}%) for call spread with buy {call_buy} and sell {call_sell}")
             
 
        """    
