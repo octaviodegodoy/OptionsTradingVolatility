@@ -26,7 +26,7 @@ from scipy.stats import norm
 from scipy.optimize import brentq
 from datetime import datetime, timedelta
 
-from constants import ASSET_SYMBOL
+from constants import ASSET_SYMBOL, PERIODS, SHIFT_PERIODS
 
 # Resolve paths relative to this script's directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -37,6 +37,204 @@ sys.path.insert(0, PARENT_DIR)
 # MODE SELECTION — set to "BOVA11" or "SPY"
 # ============================================================
 VALIDATION_MODE = "BOVA11"   # "BOVA11" for Brazilian market, "SPY" for US cross-check
+
+
+# ============================================================
+# Kalman Filter — $IND ↔ BOVA11 Price Mapper
+# ============================================================
+class KalmanPriceMapper:
+    """
+    Uses a Kalman Filter to dynamically estimate the linear relationship
+    between $IND (Bovespa index futures) and BOVA11 (Bovespa ETF):
+
+        P_IND = alpha + beta * P_BOVA11
+
+    After fitting on historical data, converts BOVA11 prices (e.g. GEX
+    strike levels) to their $IND equivalents and vice-versa.
+
+    State vector: [alpha, beta]
+    Observation:  P_IND_t = [1, P_BOVA11_t] · [alpha_t, beta_t]' + noise
+    """
+
+    def __init__(self,
+                 delta: float = 1e-4,
+                 observation_noise: float = 100.0,
+                 initial_alpha: float = 0.0,
+                 initial_beta: float = 1000.0,
+                 initial_variance: float = 1e4):
+        """
+        Parameters
+        ----------
+        delta : float
+            Process noise scalar — controls how fast alpha/beta can drift.
+        observation_noise : float
+            Measurement noise variance (R). For IND points ~130 000, a
+            value around 100–1000 is reasonable.
+        initial_alpha : float
+            Starting intercept guess.
+        initial_beta : float
+            Starting slope guess (IND / BOVA11 ≈ 1000).
+        initial_variance : float
+            Diagonal of the initial state covariance P_0.
+        """
+        self.delta = delta
+        self.R = observation_noise
+
+        # State: [alpha, beta]
+        self.state = np.array([initial_alpha, initial_beta], dtype=np.float64)
+        self.P = np.eye(2) * initial_variance        # state covariance
+        self.Q = np.eye(2) * delta                    # process noise
+
+        # History
+        self.alphas: list[float] = []
+        self.betas: list[float] = []
+
+    # ── core update ──────────────────────────────────────────
+    def update(self, ind_price: float, bova11_price: float):
+        """Single-step Kalman update with new price pair."""
+        H = np.array([1.0, bova11_price])              # observation vector
+
+        # Predict
+        P_pred = self.P + self.Q
+
+        # Innovation
+        y_hat = H @ self.state
+        innovation = ind_price - y_hat
+        S = H @ P_pred @ H + self.R                     # innovation variance
+
+        # Kalman gain
+        K = (P_pred @ H) / S                             # (2,)
+
+        # Update
+        self.state = self.state + K * innovation
+        self.P = P_pred - np.outer(K, H) @ P_pred
+
+        self.alphas.append(self.state[0])
+        self.betas.append(self.state[1])
+
+    # ── batch fit ────────────────────────────────────────────
+    def fit(self, ind_prices: np.ndarray, bova11_prices: np.ndarray) -> pd.DataFrame:
+        """
+        Run the filter over aligned historical arrays.
+
+        Returns a DataFrame with columns:
+            ind, bova11, alpha, beta, ind_estimated, residual
+        """
+        assert len(ind_prices) == len(bova11_prices), "Series must be same length"
+
+        self.alphas.clear()
+        self.betas.clear()
+
+        for ind_p, bova_p in zip(ind_prices, bova11_prices):
+            self.update(ind_p, bova_p)
+
+        alphas = np.array(self.alphas)
+        betas = np.array(self.betas)
+        estimated = alphas + betas * bova11_prices
+
+        return pd.DataFrame({
+            'ind': ind_prices,
+            'bova11': bova11_prices,
+            'alpha': alphas,
+            'beta': betas,
+            'ind_estimated': estimated,
+            'residual': ind_prices - estimated,
+        })
+
+    # ── conversion helpers ───────────────────────────────────
+    @property
+    def alpha(self) -> float:
+        return self.state[0]
+
+    @property
+    def beta(self) -> float:
+        return self.state[1]
+
+    def bova11_to_ind(self, bova11_price: float) -> float:
+        """Convert a BOVA11 price to the corresponding $IND price."""
+        return self.alpha + self.beta * bova11_price
+
+    def ind_to_bova11(self, ind_price: float) -> float:
+        """Convert an $IND price to the corresponding BOVA11 price."""
+        if self.beta == 0:
+            raise ValueError("beta is zero — filter not fitted yet")
+        return (ind_price - self.alpha) / self.beta
+
+    def convert_strikes(self, strikes: np.ndarray) -> np.ndarray:
+        """Convert an array of BOVA11 option strikes to $IND equivalents."""
+        return self.alpha + self.beta * np.asarray(strikes, dtype=np.float64)
+
+
+def build_ind_bova11_mapper(mt5_conn,
+                            ind_symbol: str = "WIN$N",
+                            bova11_symbol: str = "BOVA11",
+                            periods: int = PERIODS,
+                            delta: float = 1e-4,
+                            observation_noise: float = 100.0) -> KalmanPriceMapper:
+    """
+    Fetch historical daily close prices from MT5 for $IND and BOVA11,
+    fit a KalmanPriceMapper, and return it ready for conversions.
+
+    Parameters
+    ----------
+    mt5_conn : MT5Connector
+        An already-initialised MT5 connector.
+    ind_symbol : str
+        MT5 symbol for the continuous index future (e.g. "WIN$N", "IND$").
+    bova11_symbol : str
+        MT5 symbol for the ETF.
+    periods : int
+        Number of historical bars (daily) to use for calibration.
+    delta : float
+        Kalman process noise.
+    observation_noise : float
+        Kalman measurement noise.
+
+    Returns
+    -------
+    KalmanPriceMapper
+        Fitted mapper. Call .bova11_to_ind(price) or .ind_to_bova11(price).
+    """
+    df_ind = mt5_conn.get_data(ind_symbol, mt5_conn.TIMEFRAME_D1, periods, SHIFT_PERIODS)
+    df_bova = mt5_conn.get_data(bova11_symbol, mt5_conn.TIMEFRAME_D1, periods, SHIFT_PERIODS)
+
+    if df_ind is None or df_bova is None:
+        raise RuntimeError(
+            f"Could not fetch data for {ind_symbol} and/or {bova11_symbol}. "
+            "Make sure both symbols are available in MT5 Market Watch."
+        )
+
+    # Align on date
+    df_ind = df_ind.set_index('time')[['close']].rename(columns={'close': 'ind'})
+    df_bova = df_bova.set_index('time')[['close']].rename(columns={'close': 'bova11'})
+    merged = df_ind.join(df_bova, how='inner').dropna()
+
+    if len(merged) < 30:
+        raise RuntimeError(
+            f"Only {len(merged)} overlapping bars — need at least 30 for a "
+            "reliable calibration."
+        )
+
+    # Estimate sensible initial beta from OLS on last 60 bars
+    lookback = min(60, len(merged))
+    ols_beta = np.polyfit(merged['bova11'].values[-lookback:],
+                          merged['ind'].values[-lookback:], 1)[0]
+
+    mapper = KalmanPriceMapper(
+        delta=delta,
+        observation_noise=observation_noise,
+        initial_beta=ols_beta,
+    )
+    results = mapper.fit(merged['ind'].values, merged['bova11'].values)
+
+    print(f"[KalmanPriceMapper] Fitted on {len(merged)} daily bars")
+    print(f"  Latest α = {mapper.alpha:,.2f}  β = {mapper.beta:,.4f}")
+    print(f"  Residual std = {results['residual'].std():,.2f} pts")
+    print(f"  Example: BOVA11 {merged['bova11'].iloc[-1]:.2f} → "
+          f"$IND {mapper.bova11_to_ind(merged['bova11'].iloc[-1]):,.0f} "
+          f"(actual {merged['ind'].iloc[-1]:,.0f})")
+
+    return mapper
 
 # Mode-dependent imports and constants
 if VALIDATION_MODE == "BOVA11":
@@ -700,10 +898,11 @@ async def analyze_spy_validation():
 # ------------------------------------------------------------
 # Função principal de análise
 # ------------------------------------------------------------
-async def analyze_options(spot: float, underlying: str = "PETR4"):
+async def analyze_options(spot: float, underlying: str = "PETR4", ind_mapper: KalmanPriceMapper = None):
        """
        Fetch options data from B3, compute Greeks via Black-Scholes, and analyze.
        Spot is passed as a parameter so the analysis aligns with current price.
+       If ind_mapper is provided, $IND equivalents are printed alongside BOVA11 levels.
        """
 
        # Fetch options data from B3 and compute Greeks
@@ -1101,14 +1300,13 @@ async def analyze_options(spot: float, underlying: str = "PETR4"):
        print("EXTENDED MARKET STRUCTURE METRICS — STOCK TRACE-Lite View")
        print("="*75)
    
-       # --- Recomputa gamma flip suavizado para consistência
+       # --- Recomputa strikes/GEX suavizados para métricas estendidas
        # Extrai strikes e GEX.
        strikes = gex_by_strike["Strike"].to_numpy(dtype=float)
        gvals   = gex_by_strike["GEX_customer"].to_numpy(dtype=float)
        # Aplica média móvel de 5 pontos.
        smooth  = pd.Series(gvals).rolling(5, center=True, min_periods=1).mean().values
-       # Encontra gamma flip na curva mais suavizada.
-       gamma_flip = strikes[np.argmin(np.abs(smooth))] if len(strikes) else np.nan
+       # gamma_flip já foi calculado corretamente via find_gamma_flip() acima
    
        # --- Recap de PCR global
        # Armazena OI de calls e puts.
@@ -1223,10 +1421,22 @@ async def analyze_options(spot: float, underlying: str = "PETR4"):
        # Imprime um resumo final com níveis chave.
        # O objetivo é fornecer uma visão rápida das métricas principais.
        print("\nSummary Snapshot:")
-       print(f"Spot:        {spot:,.2f}")
-       print(f"Call Wall:   {call_wall:,.2f}")
-       print(f"Put Wall:    {put_wall:,.2f}")
-       print(f"Gamma Flip:  {gamma_flip:,.2f}")
+       if ind_mapper is not None:
+           ind_spot       = ind_mapper.bova11_to_ind(spot)
+           ind_call_wall  = ind_mapper.bova11_to_ind(call_wall)
+           ind_put_wall   = ind_mapper.bova11_to_ind(put_wall)
+           ind_gamma_flip = ind_mapper.bova11_to_ind(gamma_flip)
+           print(f"{'':>15} {'BOVA11':>12} {'$IND':>14}")
+           print(f"  {'Spot':<13} {spot:>12,.2f} {ind_spot:>14,.0f}")
+           print(f"  {'Call Wall':<13} {call_wall:>12,.2f} {ind_call_wall:>14,.0f}")
+           print(f"  {'Put Wall':<13} {put_wall:>12,.2f} {ind_put_wall:>14,.0f}")
+           print(f"  {'Gamma Flip':<13} {gamma_flip:>12,.2f} {ind_gamma_flip:>14,.0f}")
+           print(f"  Kalman β = {ind_mapper.beta:,.4f}  α = {ind_mapper.alpha:,.2f}")
+       else:
+           print(f"Spot:        {spot:,.2f}")
+           print(f"Call Wall:   {call_wall:,.2f}")
+           print(f"Put Wall:    {put_wall:,.2f}")
+           print(f"Gamma Flip:  {gamma_flip:,.2f}")
        print(f"Market Regime: {regime}")
        print("="*75)
        # Imprime as primeiras linhas do DataFrame para verificação.
@@ -1243,12 +1453,22 @@ async def main():
     else:
         # BOVA11 Mode — requires MetaTrader 5
         mt5_conn = MT5Connector()
+
+        # Build Kalman mapper: BOVA11 ↔ $IND
+        try:
+            ind_mapper = build_ind_bova11_mapper(mt5_conn)
+        except Exception as e:
+            print(f"[!] Could not build IND↔BOVA11 mapper: {e}")
+            ind_mapper = None
+
         for asset in ASSET_SYMBOL:
             print(f"\n{'#'*80}\nAnalyzing {asset}...\n{'#'*80}")
             symbol_info = mt5_conn.get_symbol_info(asset)
             spot_price = (symbol_info.bid + symbol_info.ask) / 2
             print(f"Analyzing options data for {asset} with spot price {spot_price:.2f}...")
-            await analyze_options(spot_price, asset)
+            # Pass ind_mapper only when analyzing BOVA11
+            mapper_for_asset = ind_mapper if asset == "BOVA11" else None
+            await analyze_options(spot_price, asset, ind_mapper=mapper_for_asset)
 # ------------------------------------------------------------
 # Exemplo de uso (descomente para executar)
 # ------------------------------------------------------------
