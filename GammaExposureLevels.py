@@ -618,7 +618,7 @@ async def analyze_spy_validation():
             print(f"  Total: ${near_gex.sum()/1e6:>+8.2f}M")
 
     # === CHARTS ===
-    fig, axes = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+    fig, axes = plt.subplots(2, 1, figsize=(5, 2), gridspec_kw={'height_ratios': [3, 1]})
     fig.suptitle(f"SPY GEX Validation — Spot: ${spot:.2f}", fontsize=14, fontweight='bold')
 
     # --- Chart 1: GEX by Strike ---
@@ -653,8 +653,8 @@ async def analyze_spy_validation():
     ax.fill_between(strikes, 0, gex_vals / 1e6,
                      where=gex_vals < 0, color='red', alpha=0.05)
 
-    # Focus x-axis around spot ±10%
-    ax.set_xlim(spot * 0.92, spot * 1.08)
+    # Focus x-axis around spot ±5%
+    ax.set_xlim(spot * 0.95, spot * 1.05)
 
     # --- Chart 2: OI by Strike (calls vs puts) ---
     ax2 = axes[1]
@@ -1074,7 +1074,7 @@ async def analyze_options(spot: float, underlying: str = "PETR4"):
        ax.set_ylabel("Gamma Exposure (USD, millions)")
        # Define título do gráfico.
        ax.set_title(f"Gamma Exposure by Strike — {underlying}")  # Nota: título menciona PETR4, mas código é para BOVA11; possivelmente um erro.
-   
+       ax.set_xlim(spot * 0.95, spot * 1.15)  # Garante que o eixo X esteja focado em torno do spot ±5%.
        # Adiciona linhas para paredes de call e put.
        if np.isfinite(call_wall):
            ax.axvline(call_wall, color="#374151", linestyle=":",  lw=1.6,
