@@ -345,6 +345,6 @@ async def main():
         print(f"Analyzing options data for {asset} with spot price {spot_price:.2f}...")
         # Pass ind_mapper only when analyzing BOVA11
         mapper_for_asset = ind_mapper if asset == "BOVA11" else None
-        await analyze_options(spot_price, asset, ind_mapper=mapper_for_asset)
+        await analyze_options(spot_price, asset, ind_mapper=mapper_for_asset, show_plots=True)
 
 asyncio.run(main())
