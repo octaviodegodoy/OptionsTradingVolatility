@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-BOVA11 Options Analytics (B3 format) — Outspoken Market version
----------------------------------------------------------------
-Reads Excel files from B3 with columns like:
-['Ticker', 'Vencimento', 'Tipo', 'Strike', 'Último', 'Vol. Impl. (%)',
- 'Delta', 'Gamma', 'Theta ($)', 'Vega', 'Tit.', 'Lan.', 'Vol. Financeiro']
+Options GEX Analytics — Outspoken Market version
+-------------------------------------------------
+Supports two modes:
+  BOVA11 — B3 Brazilian options via COTAHIST + OI proxy
+  SPY    — US equity options via yfinance (real OI) for cross-checking
+           against public GEX services (SpotGamma, SqueezeMetrics, etc.)
 
 Performs:
 - Global and range-based Put/Call Ratio
@@ -15,6 +16,7 @@ Performs:
 """
 import os
 import sys
+import time
 import numpy as np
 import pandas as pd
 import asyncio
@@ -22,18 +24,32 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from scipy.stats import norm
 from scipy.optimize import brentq
-from datetime import datetime
-from mt5_connector import MT5Connector
+from datetime import datetime, timedelta
+
+from constants import ASSET_SYMBOL
 
 # Resolve paths relative to this script's directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, PARENT_DIR)
 
-from get_b3_data import fetch_b3_historical_file, fetch_open_interest
+# ============================================================
+# MODE SELECTION — set to "BOVA11" or "SPY"
+# ============================================================
+VALIDATION_MODE = "BOVA11"   # "BOVA11" for Brazilian market, "SPY" for US cross-check
 
-UNDERLYING = "BOVA11"
-RISK_FREE_RATE = 0.1425  # Brazilian SELIC rate
+# Mode-dependent imports and constants
+if VALIDATION_MODE == "BOVA11":
+    from mt5_connector import MT5Connector
+    from get_b3_data import fetch_b3_historical_file, fetch_open_interest
+    UNDERLYING = "BOVA11"
+    RISK_FREE_RATE = 0.1425       # Brazilian SELIC
+    CONTRACT_MULTIPLIER = 1       # B3 mini options = 1 share
+else:
+    import yfinance as yf
+    UNDERLYING = "SPY"
+    RISK_FREE_RATE = 0.045        # US Fed Funds / T-Bill proxy
+    CONTRACT_MULTIPLIER = 100     # US equity options = 100 shares
 
 # Path to external OI CSV file (set to None to use multi-day volume proxy)
 # Expected CSV columns: ticker, oi  (optional: strike, type, expiration)
@@ -238,6 +254,449 @@ def load_b3_options_data(underlying, spot, date=None):
     print(f"   GEX weight: {'OI' if 'volume' not in oi_source else 'Volume (OI proxy)'}")
     return df
 
+
+# ============================================================
+# SPY Data Loader via yfinance (Validation Mode)
+# ============================================================
+def _yahoo_direct_options(symbol="SPY"):
+    """
+    Fallback: fetch options data directly from Yahoo Finance query API
+    with crumb authentication. Returns (session, crumb, base_url).
+    """
+    import requests
+    session = requests.Session()
+    session.headers['User-Agent'] = (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    )
+    # Step 1: Get cookie
+    session.get('https://fc.yahoo.com', timeout=10, allow_redirects=True)
+    # Step 2: Get crumb
+    crumb = session.get(
+        'https://query2.finance.yahoo.com/v1/test/getcrumb', timeout=10
+    ).text
+    base_url = f"https://query2.finance.yahoo.com/v7/finance/options/{symbol}"
+    return session, crumb, base_url
+
+
+def load_spy_options_data(spot=None, max_expirations=6, retry_attempts=5, retry_delay=10):
+    """
+    Fetch SPY options chain with real open interest.
+    Primary: direct Yahoo Finance query API with crumb auth.
+    Fallback: yfinance library.
+    Returns (DataFrame, spot_price).
+    """
+    print("=" * 75)
+    print("SPY VALIDATION MODE — Loading options via Yahoo Finance")
+    print("=" * 75)
+
+    records = []
+    today = datetime.now()
+
+    # --- Step 1: Establish authenticated session ---
+    session = None
+    crumb = None
+    base_url = None
+    for attempt in range(retry_attempts):
+        try:
+            session, crumb, base_url = _yahoo_direct_options("SPY")
+            print(f"[*] Yahoo session established (crumb obtained)")
+            break
+        except Exception as e:
+            print(f"[!] Session setup attempt {attempt+1}: {e}")
+            time.sleep(retry_delay)
+
+    # --- Step 2: First API call to get spot + expirations + first chain ---
+    first_data = None
+    if session and crumb:
+        for attempt in range(retry_attempts):
+            try:
+                resp = session.get(f"{base_url}?crumb={crumb}", timeout=15)
+                if resp.status_code == 429:
+                    print(f"[!] Rate limited (attempt {attempt+1}), waiting {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+                resp.raise_for_status()
+                first_data = resp.json()
+                break
+            except Exception as e:
+                print(f"[!] Direct API attempt {attempt+1}: {e}")
+                time.sleep(retry_delay)
+
+    if first_data is None:
+        # Try yfinance as fallback
+        print("[!] Direct API failed, trying yfinance...")
+        try:
+            ticker = yf.Ticker("SPY")
+            if spot is None:
+                hist = ticker.history(period="1d")
+                if not hist.empty:
+                    spot = float(hist['Close'].iloc[-1])
+            expirations = list(ticker.options[:max_expirations])
+            for exp_str in expirations:
+                time.sleep(2)
+                chain = ticker.option_chain(exp_str)
+                exp_date = datetime.strptime(exp_str, "%Y-%m-%d")
+                dte = max((exp_date - today).days, 1)
+                T = dte / 365.0
+                for opt_type, df_raw in [("CALL", chain.calls), ("PUT", chain.puts)]:
+                    for _, row in df_raw.iterrows():
+                        strike = float(row['strike'])
+                        oi = int(row.get('openInterest', 0) or 0) if not pd.isna(row.get('openInterest')) else 0
+                        volume = int(row.get('volume', 0) or 0) if not pd.isna(row.get('volume')) else 0
+                        last_price = float(row.get('lastPrice', 0) or 0) if not pd.isna(row.get('lastPrice')) else 0.0
+                        yf_iv = float(row.get('impliedVolatility', 0) or 0) if not pd.isna(row.get('impliedVolatility')) else 0.0
+                        if oi == 0: continue
+                        moneyness = strike / spot
+                        if moneyness < 0.80 or moneyness > 1.20: continue
+                        iv = yf_iv if yf_iv > 0.001 else implied_vol(spot, strike, T, RISK_FREE_RATE, last_price, opt_type.lower())
+                        gamma = bs_gamma(spot, strike, T, RISK_FREE_RATE, iv)
+                        delta = bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type.lower())
+                        records.append({
+                            'Ticker': f"SPY_{exp_str}_{strike:.0f}_{opt_type[0]}",
+                            'Tipo': opt_type, 'Strike': strike, 'Ultimo': last_price,
+                            'IV': iv, 'Delta': delta, 'Gamma': gamma,
+                            'Theta ($)': 0.0, 'Vega': 0.0, 'Tit.': oi, 'Lanc.': 0,
+                            'VolFin': last_price * oi * CONTRACT_MULTIPLIER,
+                            'DTE': dte, 'Expiration': exp_date.strftime('%Y-%m-%d'), 'Volume': volume,
+                        })
+                print(f"  [OK] {exp_str}")
+        except Exception as e:
+            print(f"[X] yfinance fallback also failed: {e}")
+            return pd.DataFrame(), spot
+
+        if not records:
+            return pd.DataFrame(), spot
+        df = pd.DataFrame(records)
+        return df, spot
+
+    # --- Parse direct API response ---
+    result = first_data['optionChain']['result'][0]
+    spot = spot or result['quote'].get('regularMarketPrice',
+                                        result['quote'].get('regularMarketPreviousClose', 0))
+    print(f"[*] SPY spot: ${spot:.2f}")
+
+    exp_timestamps = result.get('expirationDates', [])
+    if not exp_timestamps:
+        print("[X] No expirations found")
+        return pd.DataFrame(), spot
+
+    # Limit expirations
+    exp_timestamps = exp_timestamps[:max_expirations]
+    print(f"[*] Loading {len(exp_timestamps)} expirations...")
+
+    def _parse_chain(options_data, exp_ts):
+        """Parse one expiration's options from Yahoo JSON."""
+        exp_date = datetime.fromtimestamp(exp_ts)
+        exp_str = exp_date.strftime('%Y-%m-%d')
+        dte = max((exp_date - today).days, 1)
+        T = dte / 365.0
+
+        for opt_type_key, opt_type_label in [('calls', 'CALL'), ('puts', 'PUT')]:
+            for opt in options_data.get(opt_type_key, []):
+                strike = opt.get('strike', 0)
+                oi = opt.get('openInterest', 0) or 0
+                volume = opt.get('volume', 0) or 0
+                last_price = opt.get('lastPrice', 0) or 0
+                yf_iv = opt.get('impliedVolatility', 0) or 0
+
+                if oi == 0:
+                    continue
+                moneyness = strike / spot if spot > 0 else 0
+                if moneyness < 0.80 or moneyness > 1.20:
+                    continue
+
+                iv = yf_iv if yf_iv > 0.001 else implied_vol(
+                    spot, strike, T, RISK_FREE_RATE, last_price, opt_type_label.lower())
+                gamma = bs_gamma(spot, strike, T, RISK_FREE_RATE, iv)
+                delta = bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type_label.lower())
+                notional = last_price * oi * CONTRACT_MULTIPLIER
+
+                records.append({
+                    'Ticker': f"SPY_{exp_str}_{strike:.0f}_{opt_type_label[0]}",
+                    'Tipo': opt_type_label,
+                    'Strike': strike,
+                    'Ultimo': last_price,
+                    'IV': iv,
+                    'Delta': delta,
+                    'Gamma': gamma,
+                    'Theta ($)': 0.0,
+                    'Vega': 0.0,
+                    'Tit.': oi,
+                    'Lanc.': 0,
+                    'VolFin': notional,
+                    'DTE': dte,
+                    'Expiration': exp_str,
+                    'Volume': volume,
+                })
+        call_count = sum(1 for r in records if r.get('Expiration') == exp_str and r['Tipo'] == 'CALL')
+        put_count = sum(1 for r in records if r.get('Expiration') == exp_str and r['Tipo'] == 'PUT')
+        print(f"  [OK] {exp_str} (DTE {dte}): {call_count} calls, {put_count} puts")
+
+    # Parse first expiration (already in the response)
+    if result.get('options'):
+        first_opt = result['options'][0]
+        first_ts = first_opt.get('expirationDate', exp_timestamps[0])
+        _parse_chain(first_opt, first_ts)
+
+    # Fetch remaining expirations
+    for exp_ts in exp_timestamps[1:]:
+        time.sleep(0.5)  # polite delay
+        for attempt in range(retry_attempts):
+            try:
+                resp = session.get(f"{base_url}?date={exp_ts}&crumb={crumb}", timeout=15)
+                if resp.status_code == 429:
+                    print(f"  [!] Rate limited on exp {exp_ts}, waiting {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                opts = data['optionChain']['result'][0].get('options', [])
+                if opts:
+                    _parse_chain(opts[0], exp_ts)
+                break
+            except Exception as e:
+                print(f"  [!] Expiration {exp_ts} attempt {attempt+1}: {e}")
+                time.sleep(retry_delay)
+
+    if not records:
+        print("[X] No SPY options data retrieved")
+        return pd.DataFrame(), spot
+
+    df = pd.DataFrame(records)
+    calls_n = (df['Tipo'] == 'CALL').sum()
+    puts_n = (df['Tipo'] == 'PUT').sum()
+    total_oi = df['Tit.'].sum()
+    print(f"\n[*] SPY chain: {len(df)} records ({calls_n} calls, {puts_n} puts)")
+    print(f"   Total OI: {total_oi:,.0f} contracts")
+    print(f"   GEX weight: Real Open Interest (Yahoo Finance)")
+    return df, spot
+
+
+# ============================================================
+# SPY GEX Validation Analysis
+# ============================================================
+async def analyze_spy_validation():
+    """
+    Run GEX analysis on SPY and print results in a format comparable
+    to public GEX services (SpotGamma, SqueezeMetrics, Unusual Whales).
+    """
+    print("\n" + "=" * 75)
+    print("      SPY GEX VALIDATION — Cross-Check vs Public Services")
+    print("=" * 75)
+
+    result = load_spy_options_data()
+    if isinstance(result, tuple):
+        df, spot = result
+    else:
+        df, spot = result, None
+
+    if df.empty or spot is None:
+        print("[X] No data — cannot run validation")
+        return
+
+    # --- Put/Call Ratio ---
+    call_oi = df.loc[df['Tipo'] == 'CALL', 'Tit.'].sum()
+    put_oi = df.loc[df['Tipo'] == 'PUT', 'Tit.'].sum()
+    pcr_oi = put_oi / call_oi if call_oi > 0 else np.nan
+    print(f"\n--- Put/Call Ratio (OI) ---")
+    print(f"  Call OI: {call_oi:>12,.0f}")
+    print(f"  Put OI:  {put_oi:>12,.0f}")
+    print(f"  PCR:     {pcr_oi:>12.3f}")
+
+    call_vol = df.loc[df['Tipo'] == 'CALL', 'Volume'].sum()
+    put_vol = df.loc[df['Tipo'] == 'PUT', 'Volume'].sum()
+    pcr_vol = put_vol / call_vol if call_vol > 0 else np.nan
+    print(f"\n--- Put/Call Ratio (Volume) ---")
+    print(f"  Call Vol: {call_vol:>11,.0f}")
+    print(f"  Put Vol:  {put_vol:>11,.0f}")
+    print(f"  PCR:      {pcr_vol:>11.3f}")
+
+    # --- IV Skew ---
+    otm_puts = df[(df['Tipo'] == 'PUT') & (df['Strike'] < spot)]
+    otm_calls = df[(df['Tipo'] == 'CALL') & (df['Strike'] > spot)]
+    avg_put_iv = otm_puts['IV'].mean() if not otm_puts.empty else np.nan
+    avg_call_iv = otm_calls['IV'].mean() if not otm_calls.empty else np.nan
+    skew = avg_put_iv - avg_call_iv if not (np.isnan(avg_put_iv) or np.isnan(avg_call_iv)) else np.nan
+    print(f"\n--- IV Skew ---")
+    print(f"  Avg OTM Put IV:  {avg_put_iv*100:>6.2f}%")
+    print(f"  Avg OTM Call IV: {avg_call_iv*100:>6.2f}%")
+    print(f"  Skew (P-C):      {skew*100:>+6.2f}%")
+
+    # --- GEX Computation ---
+    # Same formula as BOVA11: GEX = Gamma * S^2 * OI * multiplier * sign
+    # sign: +1 for calls (dealer long gamma), -1 for puts (dealer short gamma)
+    df['sign'] = df['Tipo'].map({'CALL': 1, 'PUT': -1})
+    df['GEX'] = (df['Gamma'] * spot ** 2 * df['Tit.']
+                 * CONTRACT_MULTIPLIER * df['sign'] * 0.01)
+
+    total_gex = df['GEX'].sum()
+    total_gex_mil = total_gex / 1e6
+    print(f"\n--- Total GEX ---")
+    print(f"  Total GEX: ${total_gex_mil:>+,.2f}M")
+    print(f"  Gamma Environment: {'POSITIVE (support/pin)' if total_gex > 0 else 'NEGATIVE (volatility/acceleration)'}")
+
+    # --- GEX by Strike ---
+    gex_by_strike = df.groupby('Strike')['GEX'].sum().sort_index()
+    strikes = gex_by_strike.index.values
+    gex_vals = gex_by_strike.values
+
+    # --- Call Wall (highest call GEX above spot) ---
+    call_gex = df[df['Tipo'] == 'CALL'].groupby('Strike')['GEX'].sum()
+    call_above = call_gex[call_gex.index >= spot]
+    call_wall = call_above.idxmax() if not call_above.empty else np.nan
+
+    # --- Put Wall (most negative put GEX below spot) ---
+    put_gex = df[df['Tipo'] == 'PUT'].groupby('Strike')['GEX'].sum()
+    put_below = put_gex[put_gex.index <= spot]
+    put_wall = put_below.idxmin() if not put_below.empty else np.nan
+
+    # --- Gamma Flip ---
+    gamma_flip = find_gamma_flip(strikes, gex_vals, spot)
+
+    # --- Key Levels (SpotGamma-style output) ---
+    print(f"\n{'='*75}")
+    print(f"   SPY KEY GEX LEVELS (compare with SpotGamma / SqueezeMetrics)")
+    print(f"{'='*75}")
+    print(f"  Spot Price:   ${spot:>10,.2f}")
+    print(f"  Call Wall:    ${call_wall:>10,.2f}  (max dealer long gamma)")
+    print(f"  Put Wall:     ${put_wall:>10,.2f}  (max dealer short gamma)")
+    print(f"  Gamma Flip:   ${gamma_flip:>10,.2f}  (positive->negative gamma transition)")
+    print(f"  Total GEX:    ${total_gex_mil:>+10,.2f}M")
+
+    # Validate ordering
+    ordering_ok = put_wall <= spot <= call_wall
+    flip_ok = put_wall <= gamma_flip <= call_wall if not np.isnan(gamma_flip) else False
+    print(f"\n  Ordering Check:")
+    print(f"    Put Wall <= Spot <= Call Wall:  {'PASS' if ordering_ok else 'FAIL'}")
+    print(f"    Put Wall <= Flip <= Call Wall:  {'PASS' if flip_ok else 'WARN'}")
+
+    # --- Regime Classification ---
+    if total_gex > 0 and spot > gamma_flip:
+        regime = "POSITIVE GAMMA — Low vol, mean-reverting, pinning near call wall"
+    elif total_gex > 0 and spot <= gamma_flip:
+        regime = "TRANSITION — Positive GEX but below flip, watch for breakdown"
+    elif total_gex < 0 and spot < gamma_flip:
+        regime = "NEGATIVE GAMMA — High vol, trend-following, acceleration moves"
+    else:
+        regime = "TRANSITION — Negative GEX but above flip, watch for stabilisation"
+    print(f"\n  Market Regime: {regime}")
+
+    # --- Top Strikes by GEX ---
+    print(f"\n--- Top 10 Strikes by |GEX| ---")
+    top_strikes = gex_by_strike.abs().nlargest(10).index
+    for s in sorted(top_strikes):
+        gex_m = gex_by_strike[s] / 1e6
+        label = "CALL dom" if gex_by_strike[s] > 0 else "PUT dom"
+        print(f"  ${s:>8.0f}  |  GEX: ${gex_m:>+8.2f}M  |  {label}")
+
+    # --- Next Friday Focus ---
+    today = datetime.now()
+    days_until_friday = (4 - today.weekday()) % 7
+    if days_until_friday == 0 and today.hour >= 16:
+        days_until_friday = 7
+    next_friday = today + timedelta(days=days_until_friday)
+    nf_str = next_friday.strftime('%Y-%m-%d')
+    df_nf = df[df['Expiration'] == nf_str]
+    if not df_nf.empty:
+        nf_gex = df_nf.groupby('Strike')['GEX'].sum()
+        nf_total = nf_gex.sum() / 1e6
+        nf_call_wall = nf_gex[nf_gex.index >= spot].idxmax() if not nf_gex[nf_gex.index >= spot].empty else np.nan
+        nf_put_wall = nf_gex[nf_gex.index <= spot].idxmin() if not nf_gex[nf_gex.index <= spot].empty else np.nan
+        print(f"\n--- Next Friday ({nf_str}) GEX ---")
+        print(f"  Call Wall: ${nf_call_wall:>8,.0f}")
+        print(f"  Put Wall:  ${nf_put_wall:>8,.0f}")
+        print(f"  Total GEX: ${nf_total:>+8.2f}M")
+    else:
+        # Try nearest expiration
+        all_exps = sorted(df['Expiration'].unique())
+        if all_exps:
+            nearest = all_exps[0]
+            df_near = df[df['Expiration'] == nearest]
+            near_gex = df_near.groupby('Strike')['GEX'].sum()
+            print(f"\n--- Nearest Expiration ({nearest}) GEX ---")
+            print(f"  Total: ${near_gex.sum()/1e6:>+8.2f}M")
+
+    # === CHARTS ===
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+    fig.suptitle(f"SPY GEX Validation — Spot: ${spot:.2f}", fontsize=14, fontweight='bold')
+
+    # --- Chart 1: GEX by Strike ---
+    ax = axes[0]
+    colors = ['#2ecc71' if v > 0 else '#e74c3c' for v in gex_vals / 1e6]
+    ax.bar(strikes, gex_vals / 1e6, width=(strikes[1] - strikes[0]) * 0.7 if len(strikes) > 1 else 1,
+           color=colors, alpha=0.8, edgecolor='white', linewidth=0.3)
+
+    # Smooth line
+    if len(strikes) >= 5:
+        smooth = pd.Series(gex_vals / 1e6).rolling(5, center=True, min_periods=1).mean()
+        ax.plot(strikes, smooth, color='navy', linewidth=1.5, alpha=0.7, label='Smoothed GEX')
+
+    ax.axhline(0, color='black', linewidth=0.8)
+    ax.axvline(spot, color='blue', linewidth=2, linestyle='--', label=f'Spot ${spot:.0f}')
+    if not np.isnan(call_wall):
+        ax.axvline(call_wall, color='green', linewidth=1.5, linestyle=':', label=f'Call Wall ${call_wall:.0f}')
+    if not np.isnan(put_wall):
+        ax.axvline(put_wall, color='red', linewidth=1.5, linestyle=':', label=f'Put Wall ${put_wall:.0f}')
+    if not np.isnan(gamma_flip):
+        ax.axvline(gamma_flip, color='orange', linewidth=1.5, linestyle='-.', label=f'Flip ${gamma_flip:.1f}')
+
+    ax.set_xlabel('Strike')
+    ax.set_ylabel('GEX ($M)')
+    ax.set_title('Gamma Exposure by Strike (All Expirations)')
+    ax.legend(loc='upper left', fontsize=8)
+    ax.grid(axis='y', alpha=0.3)
+
+    # Shade positive/negative zones
+    ax.fill_between(strikes, 0, gex_vals / 1e6,
+                     where=gex_vals > 0, color='green', alpha=0.05)
+    ax.fill_between(strikes, 0, gex_vals / 1e6,
+                     where=gex_vals < 0, color='red', alpha=0.05)
+
+    # Focus x-axis around spot ±10%
+    ax.set_xlim(spot * 0.92, spot * 1.08)
+
+    # --- Chart 2: OI by Strike (calls vs puts) ---
+    ax2 = axes[1]
+    call_oi_by_strike = df[df['Tipo'] == 'CALL'].groupby('Strike')['Tit.'].sum()
+    put_oi_by_strike = df[df['Tipo'] == 'PUT'].groupby('Strike')['Tit.'].sum()
+
+    bar_w = (strikes[1] - strikes[0]) * 0.35 if len(strikes) > 1 else 0.5
+    if not call_oi_by_strike.empty:
+        ax2.bar(call_oi_by_strike.index - bar_w / 2, call_oi_by_strike.values / 1000,
+                width=bar_w, color='#2ecc71', alpha=0.7, label='Call OI')
+    if not put_oi_by_strike.empty:
+        ax2.bar(put_oi_by_strike.index + bar_w / 2, put_oi_by_strike.values / 1000,
+                width=bar_w, color='#e74c3c', alpha=0.7, label='Put OI')
+
+    ax2.axvline(spot, color='blue', linewidth=1.5, linestyle='--')
+    ax2.set_xlabel('Strike')
+    ax2.set_ylabel('OI (thousands)')
+    ax2.set_title('Open Interest by Strike')
+    ax2.legend(fontsize=8)
+    ax2.set_xlim(spot * 0.92, spot * 1.08)
+    ax2.grid(axis='y', alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(SCRIPT_DIR, "spy_gex_validation.png"), dpi=150, bbox_inches='tight')
+    print(f"\n[*] Chart saved: spy_gex_validation.png")
+    plt.show()
+
+    # --- Reference comparison template ---
+    print(f"\n{'='*75}")
+    print("  CROSS-CHECK TEMPLATE (compare with SpotGamma / SqueezeMetrics)")
+    print(f"{'='*75}")
+    print(f"  {'Metric':<20} {'Our Model':>15} {'SpotGamma':>15} {'Delta':>10}")
+    print(f"  {'-'*60}")
+    print(f"  {'Call Wall':<20} {'$'+f'{call_wall:,.0f}':>15} {'(enter)':>15} {'':>10}")
+    print(f"  {'Put Wall':<20} {'$'+f'{put_wall:,.0f}':>15} {'(enter)':>15} {'':>10}")
+    print(f"  {'Gamma Flip':<20} {'$'+f'{gamma_flip:,.1f}':>15} {'(enter)':>15} {'':>10}")
+    print(f"  {'Total GEX':<20} {'$'+f'{total_gex_mil:+,.1f}M':>15} {'(enter)':>15} {'':>10}")
+    print(f"  {'Gamma Env.':<20} {'POS' if total_gex > 0 else 'NEG':>15} {'(enter)':>15} {'':>10}")
+    print(f"\n  Fill in SpotGamma/SqueezeMetrics values to validate model accuracy.")
+    print(f"{'='*75}")
+
+
 # ------------------------------------------------------------
 # Função principal de análise
 # ------------------------------------------------------------
@@ -357,7 +816,7 @@ async def analyze_options(spot: float, underlying: str = "PETR4"):
        # Adiciona uma linha vertical no strike mais próximo do spot como âncora visual.
        plt.axvline(np.argmin(np.abs(vol_by_strike.index - spot)), color='black', linestyle='--')
        # Define o título do gráfico.
-       plt.title("Volume Financeiro por Strike — Ativo")
+       plt.title(f"Volume Financeiro por Strike — {underlying}")
        # Define o rótulo do eixo Y.
        plt.ylabel("Volume (R$)")
        # Define o rótulo do eixo X.
@@ -614,7 +1073,7 @@ async def analyze_options(spot: float, underlying: str = "PETR4"):
        # Define rótulo do eixo Y.
        ax.set_ylabel("Gamma Exposure (USD, millions)")
        # Define título do gráfico.
-       ax.set_title(f"Gamma Exposure by Strike — {UNDERLYING}")  # Nota: título menciona PETR4, mas código é para BOVA11; possivelmente um erro.
+       ax.set_title(f"Gamma Exposure by Strike — {underlying}")  # Nota: título menciona PETR4, mas código é para BOVA11; possivelmente um erro.
    
        # Adiciona linhas para paredes de call e put.
        if np.isfinite(call_wall):
@@ -777,12 +1236,19 @@ async def analyze_options(spot: float, underlying: str = "PETR4"):
        print(df.columns)
 
 async def main():
-    # Conecta ao MetaTrader 5 para obter o preço spot atual.
-    mt5_conn = MT5Connector()
-    symbol_info = mt5_conn.get_symbol_info(UNDERLYING)
-    spot_price = (symbol_info.bid + symbol_info.ask) / 2  # Usa o preço médio como spot
-    print(f"Analyzing options data for {UNDERLYING} with spot price {spot_price:.2f}...")
-    await analyze_options(spot_price, UNDERLYING)
+    if VALIDATION_MODE == "SPY":
+        # SPY Validation Mode — no MT5 needed
+        print(f"Running SPY GEX Validation Mode...")
+        await analyze_spy_validation()
+    else:
+        # BOVA11 Mode — requires MetaTrader 5
+        mt5_conn = MT5Connector()
+        for asset in ASSET_SYMBOL:
+            print(f"\n{'#'*80}\nAnalyzing {asset}...\n{'#'*80}")
+            symbol_info = mt5_conn.get_symbol_info(asset)
+            spot_price = (symbol_info.bid + symbol_info.ask) / 2
+            print(f"Analyzing options data for {asset} with spot price {spot_price:.2f}...")
+            await analyze_options(spot_price, asset)
 # ------------------------------------------------------------
 # Exemplo de uso (descomente para executar)
 # ------------------------------------------------------------
