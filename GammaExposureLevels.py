@@ -2,10 +2,7 @@
 """
 Options GEX Analytics — Outspoken Market version
 -------------------------------------------------
-Supports two modes:
-  BOVA11 — B3 Brazilian options via COTAHIST + OI proxy
-  SPY    — US equity options via yfinance (real OI) for cross-checking
-           against public GEX services (SpotGamma, SqueezeMetrics, etc.)
+BOVA11 — B3 Brazilian options via COTAHIST + OI proxy
 
 Performs:
 - Global and range-based Put/Call Ratio
@@ -13,6 +10,7 @@ Performs:
 - Notional by strike (volume financeiro)
 - Gamma Exposure (Customer/Dealer)
 - Call/Put walls and Gamma Flip
+- $IND ↔ BOVA11 Kalman regression & delta-neutral hedge sizing
 """
 import os
 import sys
@@ -26,232 +24,26 @@ from scipy.stats import norm
 from scipy.optimize import brentq
 from datetime import datetime, timedelta
 
-from constants import ASSET_SYMBOL, PERIODS, SHIFT_PERIODS
+from constants import ASSET_SYMBOL
+
+from kalman_price_mapper import (
+    KalmanPriceMapper,
+    build_ind_bova11_mapper,
+    calculate_hedge_options,
+    calculate_delta_neutral_hedge,
+)
 
 # Resolve paths relative to this script's directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, PARENT_DIR)
 
-# ============================================================
-# MODE SELECTION — set to "BOVA11" or "SPY"
-# ============================================================
-VALIDATION_MODE = "BOVA11"   # "BOVA11" for Brazilian market, "SPY" for US cross-check
+from mt5_connector import MT5Connector
+from get_b3_data import fetch_b3_historical_file, fetch_open_interest
 
-
-# ============================================================
-# Kalman Filter — $IND ↔ BOVA11 Price Mapper
-# ============================================================
-class KalmanPriceMapper:
-    """
-    Uses a Kalman Filter to dynamically estimate the linear relationship
-    between $IND (Bovespa index futures) and BOVA11 (Bovespa ETF):
-
-        P_IND = alpha + beta * P_BOVA11
-
-    After fitting on historical data, converts BOVA11 prices (e.g. GEX
-    strike levels) to their $IND equivalents and vice-versa.
-
-    State vector: [alpha, beta]
-    Observation:  P_IND_t = [1, P_BOVA11_t] · [alpha_t, beta_t]' + noise
-    """
-
-    def __init__(self,
-                 delta: float = 1e-4,
-                 observation_noise: float = 100.0,
-                 initial_alpha: float = 0.0,
-                 initial_beta: float = 1000.0,
-                 initial_variance: float = 1e4):
-        """
-        Parameters
-        ----------
-        delta : float
-            Process noise scalar — controls how fast alpha/beta can drift.
-        observation_noise : float
-            Measurement noise variance (R). For IND points ~130 000, a
-            value around 100–1000 is reasonable.
-        initial_alpha : float
-            Starting intercept guess.
-        initial_beta : float
-            Starting slope guess (IND / BOVA11 ≈ 1000).
-        initial_variance : float
-            Diagonal of the initial state covariance P_0.
-        """
-        self.delta = delta
-        self.R = observation_noise
-
-        # State: [alpha, beta]
-        self.state = np.array([initial_alpha, initial_beta], dtype=np.float64)
-        self.P = np.eye(2) * initial_variance        # state covariance
-        self.Q = np.eye(2) * delta                    # process noise
-
-        # History
-        self.alphas: list[float] = []
-        self.betas: list[float] = []
-
-    # ── core update ──────────────────────────────────────────
-    def update(self, ind_price: float, bova11_price: float):
-        """Single-step Kalman update with new price pair."""
-        H = np.array([1.0, bova11_price])              # observation vector
-
-        # Predict
-        P_pred = self.P + self.Q
-
-        # Innovation
-        y_hat = H @ self.state
-        innovation = ind_price - y_hat
-        S = H @ P_pred @ H + self.R                     # innovation variance
-
-        # Kalman gain
-        K = (P_pred @ H) / S                             # (2,)
-
-        # Update
-        self.state = self.state + K * innovation
-        self.P = P_pred - np.outer(K, H) @ P_pred
-
-        self.alphas.append(self.state[0])
-        self.betas.append(self.state[1])
-
-    # ── batch fit ────────────────────────────────────────────
-    def fit(self, ind_prices: np.ndarray, bova11_prices: np.ndarray) -> pd.DataFrame:
-        """
-        Run the filter over aligned historical arrays.
-
-        Returns a DataFrame with columns:
-            ind, bova11, alpha, beta, ind_estimated, residual
-        """
-        assert len(ind_prices) == len(bova11_prices), "Series must be same length"
-
-        self.alphas.clear()
-        self.betas.clear()
-
-        for ind_p, bova_p in zip(ind_prices, bova11_prices):
-            self.update(ind_p, bova_p)
-
-        alphas = np.array(self.alphas)
-        betas = np.array(self.betas)
-        estimated = alphas + betas * bova11_prices
-
-        return pd.DataFrame({
-            'ind': ind_prices,
-            'bova11': bova11_prices,
-            'alpha': alphas,
-            'beta': betas,
-            'ind_estimated': estimated,
-            'residual': ind_prices - estimated,
-        })
-
-    # ── conversion helpers ───────────────────────────────────
-    @property
-    def alpha(self) -> float:
-        return self.state[0]
-
-    @property
-    def beta(self) -> float:
-        return self.state[1]
-
-    def bova11_to_ind(self, bova11_price: float) -> float:
-        """Convert a BOVA11 price to the corresponding $IND price."""
-        return self.alpha + self.beta * bova11_price
-
-    def ind_to_bova11(self, ind_price: float) -> float:
-        """Convert an $IND price to the corresponding BOVA11 price."""
-        if self.beta == 0:
-            raise ValueError("beta is zero — filter not fitted yet")
-        return (ind_price - self.alpha) / self.beta
-
-    def convert_strikes(self, strikes: np.ndarray) -> np.ndarray:
-        """Convert an array of BOVA11 option strikes to $IND equivalents."""
-        return self.alpha + self.beta * np.asarray(strikes, dtype=np.float64)
-
-
-def build_ind_bova11_mapper(mt5_conn,
-                            ind_symbol: str = "WIN$N",
-                            bova11_symbol: str = "BOVA11",
-                            periods: int = PERIODS,
-                            delta: float = 1e-4,
-                            observation_noise: float = 100.0) -> KalmanPriceMapper:
-    """
-    Fetch historical daily close prices from MT5 for $IND and BOVA11,
-    fit a KalmanPriceMapper, and return it ready for conversions.
-
-    Parameters
-    ----------
-    mt5_conn : MT5Connector
-        An already-initialised MT5 connector.
-    ind_symbol : str
-        MT5 symbol for the continuous index future (e.g. "WIN$N", "IND$").
-    bova11_symbol : str
-        MT5 symbol for the ETF.
-    periods : int
-        Number of historical bars (daily) to use for calibration.
-    delta : float
-        Kalman process noise.
-    observation_noise : float
-        Kalman measurement noise.
-
-    Returns
-    -------
-    KalmanPriceMapper
-        Fitted mapper. Call .bova11_to_ind(price) or .ind_to_bova11(price).
-    """
-    df_ind = mt5_conn.get_data(ind_symbol, mt5_conn.TIMEFRAME_D1, periods, SHIFT_PERIODS)
-    df_bova = mt5_conn.get_data(bova11_symbol, mt5_conn.TIMEFRAME_D1, periods, SHIFT_PERIODS)
-
-    if df_ind is None or df_bova is None:
-        raise RuntimeError(
-            f"Could not fetch data for {ind_symbol} and/or {bova11_symbol}. "
-            "Make sure both symbols are available in MT5 Market Watch."
-        )
-
-    # Align on date
-    df_ind = df_ind.set_index('time')[['close']].rename(columns={'close': 'ind'})
-    df_bova = df_bova.set_index('time')[['close']].rename(columns={'close': 'bova11'})
-    merged = df_ind.join(df_bova, how='inner').dropna()
-
-    if len(merged) < 30:
-        raise RuntimeError(
-            f"Only {len(merged)} overlapping bars — need at least 30 for a "
-            "reliable calibration."
-        )
-
-    # Estimate sensible initial beta from OLS on last 60 bars
-    lookback = min(60, len(merged))
-    ols_beta = np.polyfit(merged['bova11'].values[-lookback:],
-                          merged['ind'].values[-lookback:], 1)[0]
-
-    mapper = KalmanPriceMapper(
-        delta=delta,
-        observation_noise=observation_noise,
-        initial_beta=ols_beta,
-    )
-    results = mapper.fit(merged['ind'].values, merged['bova11'].values)
-
-    print(f"[KalmanPriceMapper] Fitted on {len(merged)} daily bars")
-    print(f"  Latest α = {mapper.alpha:,.2f}  β = {mapper.beta:,.4f}")
-    print(f"  Residual std = {results['residual'].std():,.2f} pts")
-    print(f"  Example: BOVA11 {merged['bova11'].iloc[-1]:.2f} → "
-          f"$IND {mapper.bova11_to_ind(merged['bova11'].iloc[-1]):,.0f} "
-          f"(actual {merged['ind'].iloc[-1]:,.0f})")
-
-    return mapper
-
-# Mode-dependent imports and constants
-if VALIDATION_MODE == "BOVA11":
-    from mt5_connector import MT5Connector
-    from get_b3_data import fetch_b3_historical_file, fetch_open_interest
-    UNDERLYING = "BOVA11"
-    RISK_FREE_RATE = 0.1425       # Brazilian SELIC
-    CONTRACT_MULTIPLIER = 1       # B3 mini options = 1 share
-else:
-    import yfinance as yf
-    UNDERLYING = "SPY"
-    RISK_FREE_RATE = 0.045        # US Fed Funds / T-Bill proxy
-    CONTRACT_MULTIPLIER = 100     # US equity options = 100 shares
-
-# Path to external OI CSV file (set to None to use multi-day volume proxy)
-# Expected CSV columns: ticker, oi  (optional: strike, type, expiration)
-OI_CSV_PATH = None  # e.g., os.path.join(SCRIPT_DIR, "bova11_oi.csv")
+UNDERLYING = "BOVA11"
+RISK_FREE_RATE = 0.1425       # Brazilian SELIC
+CONTRACT_MULTIPLIER = 1       # B3 mini options = 1 share
 
 
 # ============================================================
@@ -423,7 +215,6 @@ def load_b3_options_data(underlying, spot, date=None):
     try:
         oi_data = fetch_open_interest(
             underlying=underlying,
-            oi_csv_path=OI_CSV_PATH,
             multiday_days=5,
         )
         if not oi_data.empty and 'ticker' in oi_data.columns and 'oi' in oi_data.columns:
@@ -453,456 +244,15 @@ def load_b3_options_data(underlying, spot, date=None):
     return df
 
 
-# ============================================================
-# SPY Data Loader via yfinance (Validation Mode)
-# ============================================================
-def _yahoo_direct_options(symbol="SPY"):
-    """
-    Fallback: fetch options data directly from Yahoo Finance query API
-    with crumb authentication. Returns (session, crumb, base_url).
-    """
-    import requests
-    session = requests.Session()
-    session.headers['User-Agent'] = (
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    )
-    # Step 1: Get cookie
-    session.get('https://fc.yahoo.com', timeout=10, allow_redirects=True)
-    # Step 2: Get crumb
-    crumb = session.get(
-        'https://query2.finance.yahoo.com/v1/test/getcrumb', timeout=10
-    ).text
-    base_url = f"https://query2.finance.yahoo.com/v7/finance/options/{symbol}"
-    return session, crumb, base_url
-
-
-def load_spy_options_data(spot=None, max_expirations=6, retry_attempts=5, retry_delay=10):
-    """
-    Fetch SPY options chain with real open interest.
-    Primary: direct Yahoo Finance query API with crumb auth.
-    Fallback: yfinance library.
-    Returns (DataFrame, spot_price).
-    """
-    print("=" * 75)
-    print("SPY VALIDATION MODE — Loading options via Yahoo Finance")
-    print("=" * 75)
-
-    records = []
-    today = datetime.now()
-
-    # --- Step 1: Establish authenticated session ---
-    session = None
-    crumb = None
-    base_url = None
-    for attempt in range(retry_attempts):
-        try:
-            session, crumb, base_url = _yahoo_direct_options("SPY")
-            print(f"[*] Yahoo session established (crumb obtained)")
-            break
-        except Exception as e:
-            print(f"[!] Session setup attempt {attempt+1}: {e}")
-            time.sleep(retry_delay)
-
-    # --- Step 2: First API call to get spot + expirations + first chain ---
-    first_data = None
-    if session and crumb:
-        for attempt in range(retry_attempts):
-            try:
-                resp = session.get(f"{base_url}?crumb={crumb}", timeout=15)
-                if resp.status_code == 429:
-                    print(f"[!] Rate limited (attempt {attempt+1}), waiting {retry_delay}s...")
-                    time.sleep(retry_delay)
-                    continue
-                resp.raise_for_status()
-                first_data = resp.json()
-                break
-            except Exception as e:
-                print(f"[!] Direct API attempt {attempt+1}: {e}")
-                time.sleep(retry_delay)
-
-    if first_data is None:
-        # Try yfinance as fallback
-        print("[!] Direct API failed, trying yfinance...")
-        try:
-            ticker = yf.Ticker("SPY")
-            if spot is None:
-                hist = ticker.history(period="1d")
-                if not hist.empty:
-                    spot = float(hist['Close'].iloc[-1])
-            expirations = list(ticker.options[:max_expirations])
-            for exp_str in expirations:
-                time.sleep(2)
-                chain = ticker.option_chain(exp_str)
-                exp_date = datetime.strptime(exp_str, "%Y-%m-%d")
-                dte = max((exp_date - today).days, 1)
-                T = dte / 365.0
-                for opt_type, df_raw in [("CALL", chain.calls), ("PUT", chain.puts)]:
-                    for _, row in df_raw.iterrows():
-                        strike = float(row['strike'])
-                        oi = int(row.get('openInterest', 0) or 0) if not pd.isna(row.get('openInterest')) else 0
-                        volume = int(row.get('volume', 0) or 0) if not pd.isna(row.get('volume')) else 0
-                        last_price = float(row.get('lastPrice', 0) or 0) if not pd.isna(row.get('lastPrice')) else 0.0
-                        yf_iv = float(row.get('impliedVolatility', 0) or 0) if not pd.isna(row.get('impliedVolatility')) else 0.0
-                        if oi == 0: continue
-                        moneyness = strike / spot
-                        if moneyness < 0.80 or moneyness > 1.20: continue
-                        iv = yf_iv if yf_iv > 0.001 else implied_vol(spot, strike, T, RISK_FREE_RATE, last_price, opt_type.lower())
-                        gamma = bs_gamma(spot, strike, T, RISK_FREE_RATE, iv)
-                        delta = bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type.lower())
-                        records.append({
-                            'Ticker': f"SPY_{exp_str}_{strike:.0f}_{opt_type[0]}",
-                            'Tipo': opt_type, 'Strike': strike, 'Ultimo': last_price,
-                            'IV': iv, 'Delta': delta, 'Gamma': gamma,
-                            'Theta ($)': 0.0, 'Vega': 0.0, 'Tit.': oi, 'Lanc.': 0,
-                            'VolFin': last_price * oi * CONTRACT_MULTIPLIER,
-                            'DTE': dte, 'Expiration': exp_date.strftime('%Y-%m-%d'), 'Volume': volume,
-                        })
-                print(f"  [OK] {exp_str}")
-        except Exception as e:
-            print(f"[X] yfinance fallback also failed: {e}")
-            return pd.DataFrame(), spot
-
-        if not records:
-            return pd.DataFrame(), spot
-        df = pd.DataFrame(records)
-        return df, spot
-
-    # --- Parse direct API response ---
-    result = first_data['optionChain']['result'][0]
-    spot = spot or result['quote'].get('regularMarketPrice',
-                                        result['quote'].get('regularMarketPreviousClose', 0))
-    print(f"[*] SPY spot: ${spot:.2f}")
-
-    exp_timestamps = result.get('expirationDates', [])
-    if not exp_timestamps:
-        print("[X] No expirations found")
-        return pd.DataFrame(), spot
-
-    # Limit expirations
-    exp_timestamps = exp_timestamps[:max_expirations]
-    print(f"[*] Loading {len(exp_timestamps)} expirations...")
-
-    def _parse_chain(options_data, exp_ts):
-        """Parse one expiration's options from Yahoo JSON."""
-        exp_date = datetime.fromtimestamp(exp_ts)
-        exp_str = exp_date.strftime('%Y-%m-%d')
-        dte = max((exp_date - today).days, 1)
-        T = dte / 365.0
-
-        for opt_type_key, opt_type_label in [('calls', 'CALL'), ('puts', 'PUT')]:
-            for opt in options_data.get(opt_type_key, []):
-                strike = opt.get('strike', 0)
-                oi = opt.get('openInterest', 0) or 0
-                volume = opt.get('volume', 0) or 0
-                last_price = opt.get('lastPrice', 0) or 0
-                yf_iv = opt.get('impliedVolatility', 0) or 0
-
-                if oi == 0:
-                    continue
-                moneyness = strike / spot if spot > 0 else 0
-                if moneyness < 0.80 or moneyness > 1.20:
-                    continue
-
-                iv = yf_iv if yf_iv > 0.001 else implied_vol(
-                    spot, strike, T, RISK_FREE_RATE, last_price, opt_type_label.lower())
-                gamma = bs_gamma(spot, strike, T, RISK_FREE_RATE, iv)
-                delta = bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type_label.lower())
-                notional = last_price * oi * CONTRACT_MULTIPLIER
-
-                records.append({
-                    'Ticker': f"SPY_{exp_str}_{strike:.0f}_{opt_type_label[0]}",
-                    'Tipo': opt_type_label,
-                    'Strike': strike,
-                    'Ultimo': last_price,
-                    'IV': iv,
-                    'Delta': delta,
-                    'Gamma': gamma,
-                    'Theta ($)': 0.0,
-                    'Vega': 0.0,
-                    'Tit.': oi,
-                    'Lanc.': 0,
-                    'VolFin': notional,
-                    'DTE': dte,
-                    'Expiration': exp_str,
-                    'Volume': volume,
-                })
-        call_count = sum(1 for r in records if r.get('Expiration') == exp_str and r['Tipo'] == 'CALL')
-        put_count = sum(1 for r in records if r.get('Expiration') == exp_str and r['Tipo'] == 'PUT')
-        print(f"  [OK] {exp_str} (DTE {dte}): {call_count} calls, {put_count} puts")
-
-    # Parse first expiration (already in the response)
-    if result.get('options'):
-        first_opt = result['options'][0]
-        first_ts = first_opt.get('expirationDate', exp_timestamps[0])
-        _parse_chain(first_opt, first_ts)
-
-    # Fetch remaining expirations
-    for exp_ts in exp_timestamps[1:]:
-        time.sleep(0.5)  # polite delay
-        for attempt in range(retry_attempts):
-            try:
-                resp = session.get(f"{base_url}?date={exp_ts}&crumb={crumb}", timeout=15)
-                if resp.status_code == 429:
-                    print(f"  [!] Rate limited on exp {exp_ts}, waiting {retry_delay}s...")
-                    time.sleep(retry_delay)
-                    continue
-                resp.raise_for_status()
-                data = resp.json()
-                opts = data['optionChain']['result'][0].get('options', [])
-                if opts:
-                    _parse_chain(opts[0], exp_ts)
-                break
-            except Exception as e:
-                print(f"  [!] Expiration {exp_ts} attempt {attempt+1}: {e}")
-                time.sleep(retry_delay)
-
-    if not records:
-        print("[X] No SPY options data retrieved")
-        return pd.DataFrame(), spot
-
-    df = pd.DataFrame(records)
-    calls_n = (df['Tipo'] == 'CALL').sum()
-    puts_n = (df['Tipo'] == 'PUT').sum()
-    total_oi = df['Tit.'].sum()
-    print(f"\n[*] SPY chain: {len(df)} records ({calls_n} calls, {puts_n} puts)")
-    print(f"   Total OI: {total_oi:,.0f} contracts")
-    print(f"   GEX weight: Real Open Interest (Yahoo Finance)")
-    return df, spot
-
-
-# ============================================================
-# SPY GEX Validation Analysis
-# ============================================================
-async def analyze_spy_validation():
-    """
-    Run GEX analysis on SPY and print results in a format comparable
-    to public GEX services (SpotGamma, SqueezeMetrics, Unusual Whales).
-    """
-    print("\n" + "=" * 75)
-    print("      SPY GEX VALIDATION — Cross-Check vs Public Services")
-    print("=" * 75)
-
-    result = load_spy_options_data()
-    if isinstance(result, tuple):
-        df, spot = result
-    else:
-        df, spot = result, None
-
-    if df.empty or spot is None:
-        print("[X] No data — cannot run validation")
-        return
-
-    # --- Put/Call Ratio ---
-    call_oi = df.loc[df['Tipo'] == 'CALL', 'Tit.'].sum()
-    put_oi = df.loc[df['Tipo'] == 'PUT', 'Tit.'].sum()
-    pcr_oi = put_oi / call_oi if call_oi > 0 else np.nan
-    print(f"\n--- Put/Call Ratio (OI) ---")
-    print(f"  Call OI: {call_oi:>12,.0f}")
-    print(f"  Put OI:  {put_oi:>12,.0f}")
-    print(f"  PCR:     {pcr_oi:>12.3f}")
-
-    call_vol = df.loc[df['Tipo'] == 'CALL', 'Volume'].sum()
-    put_vol = df.loc[df['Tipo'] == 'PUT', 'Volume'].sum()
-    pcr_vol = put_vol / call_vol if call_vol > 0 else np.nan
-    print(f"\n--- Put/Call Ratio (Volume) ---")
-    print(f"  Call Vol: {call_vol:>11,.0f}")
-    print(f"  Put Vol:  {put_vol:>11,.0f}")
-    print(f"  PCR:      {pcr_vol:>11.3f}")
-
-    # --- IV Skew ---
-    otm_puts = df[(df['Tipo'] == 'PUT') & (df['Strike'] < spot)]
-    otm_calls = df[(df['Tipo'] == 'CALL') & (df['Strike'] > spot)]
-    avg_put_iv = otm_puts['IV'].mean() if not otm_puts.empty else np.nan
-    avg_call_iv = otm_calls['IV'].mean() if not otm_calls.empty else np.nan
-    skew = avg_put_iv - avg_call_iv if not (np.isnan(avg_put_iv) or np.isnan(avg_call_iv)) else np.nan
-    print(f"\n--- IV Skew ---")
-    print(f"  Avg OTM Put IV:  {avg_put_iv*100:>6.2f}%")
-    print(f"  Avg OTM Call IV: {avg_call_iv*100:>6.2f}%")
-    print(f"  Skew (P-C):      {skew*100:>+6.2f}%")
-
-    # --- GEX Computation ---
-    # Same formula as BOVA11: GEX = Gamma * S^2 * OI * multiplier * sign
-    # sign: +1 for calls (dealer long gamma), -1 for puts (dealer short gamma)
-    df['sign'] = df['Tipo'].map({'CALL': 1, 'PUT': -1})
-    df['GEX'] = (df['Gamma'] * spot ** 2 * df['Tit.']
-                 * CONTRACT_MULTIPLIER * df['sign'] * 0.01)
-
-    total_gex = df['GEX'].sum()
-    total_gex_mil = total_gex / 1e6
-    print(f"\n--- Total GEX ---")
-    print(f"  Total GEX: ${total_gex_mil:>+,.2f}M")
-    print(f"  Gamma Environment: {'POSITIVE (support/pin)' if total_gex > 0 else 'NEGATIVE (volatility/acceleration)'}")
-
-    # --- GEX by Strike ---
-    gex_by_strike = df.groupby('Strike')['GEX'].sum().sort_index()
-    strikes = gex_by_strike.index.values
-    gex_vals = gex_by_strike.values
-
-    # --- Call Wall (highest call GEX above spot) ---
-    call_gex = df[df['Tipo'] == 'CALL'].groupby('Strike')['GEX'].sum()
-    call_above = call_gex[call_gex.index >= spot]
-    call_wall = call_above.idxmax() if not call_above.empty else np.nan
-
-    # --- Put Wall (most negative put GEX below spot) ---
-    put_gex = df[df['Tipo'] == 'PUT'].groupby('Strike')['GEX'].sum()
-    put_below = put_gex[put_gex.index <= spot]
-    put_wall = put_below.idxmin() if not put_below.empty else np.nan
-
-    # --- Gamma Flip ---
-    gamma_flip = find_gamma_flip(strikes, gex_vals, spot)
-
-    # --- Key Levels (SpotGamma-style output) ---
-    print(f"\n{'='*75}")
-    print(f"   SPY KEY GEX LEVELS (compare with SpotGamma / SqueezeMetrics)")
-    print(f"{'='*75}")
-    print(f"  Spot Price:   ${spot:>10,.2f}")
-    print(f"  Call Wall:    ${call_wall:>10,.2f}  (max dealer long gamma)")
-    print(f"  Put Wall:     ${put_wall:>10,.2f}  (max dealer short gamma)")
-    print(f"  Gamma Flip:   ${gamma_flip:>10,.2f}  (positive->negative gamma transition)")
-    print(f"  Total GEX:    ${total_gex_mil:>+10,.2f}M")
-
-    # Validate ordering
-    ordering_ok = put_wall <= spot <= call_wall
-    flip_ok = put_wall <= gamma_flip <= call_wall if not np.isnan(gamma_flip) else False
-    print(f"\n  Ordering Check:")
-    print(f"    Put Wall <= Spot <= Call Wall:  {'PASS' if ordering_ok else 'FAIL'}")
-    print(f"    Put Wall <= Flip <= Call Wall:  {'PASS' if flip_ok else 'WARN'}")
-
-    # --- Regime Classification ---
-    if total_gex > 0 and spot > gamma_flip:
-        regime = "POSITIVE GAMMA — Low vol, mean-reverting, pinning near call wall"
-    elif total_gex > 0 and spot <= gamma_flip:
-        regime = "TRANSITION — Positive GEX but below flip, watch for breakdown"
-    elif total_gex < 0 and spot < gamma_flip:
-        regime = "NEGATIVE GAMMA — High vol, trend-following, acceleration moves"
-    else:
-        regime = "TRANSITION — Negative GEX but above flip, watch for stabilisation"
-    print(f"\n  Market Regime: {regime}")
-
-    # --- Top Strikes by GEX ---
-    print(f"\n--- Top 10 Strikes by |GEX| ---")
-    top_strikes = gex_by_strike.abs().nlargest(10).index
-    for s in sorted(top_strikes):
-        gex_m = gex_by_strike[s] / 1e6
-        label = "CALL dom" if gex_by_strike[s] > 0 else "PUT dom"
-        print(f"  ${s:>8.0f}  |  GEX: ${gex_m:>+8.2f}M  |  {label}")
-
-    # --- Next Friday Focus ---
-    today = datetime.now()
-    days_until_friday = (4 - today.weekday()) % 7
-    if days_until_friday == 0 and today.hour >= 16:
-        days_until_friday = 7
-    next_friday = today + timedelta(days=days_until_friday)
-    nf_str = next_friday.strftime('%Y-%m-%d')
-    df_nf = df[df['Expiration'] == nf_str]
-    if not df_nf.empty:
-        nf_gex = df_nf.groupby('Strike')['GEX'].sum()
-        nf_total = nf_gex.sum() / 1e6
-        nf_call_wall = nf_gex[nf_gex.index >= spot].idxmax() if not nf_gex[nf_gex.index >= spot].empty else np.nan
-        nf_put_wall = nf_gex[nf_gex.index <= spot].idxmin() if not nf_gex[nf_gex.index <= spot].empty else np.nan
-        print(f"\n--- Next Friday ({nf_str}) GEX ---")
-        print(f"  Call Wall: ${nf_call_wall:>8,.0f}")
-        print(f"  Put Wall:  ${nf_put_wall:>8,.0f}")
-        print(f"  Total GEX: ${nf_total:>+8.2f}M")
-    else:
-        # Try nearest expiration
-        all_exps = sorted(df['Expiration'].unique())
-        if all_exps:
-            nearest = all_exps[0]
-            df_near = df[df['Expiration'] == nearest]
-            near_gex = df_near.groupby('Strike')['GEX'].sum()
-            print(f"\n--- Nearest Expiration ({nearest}) GEX ---")
-            print(f"  Total: ${near_gex.sum()/1e6:>+8.2f}M")
-
-    # === CHARTS ===
-    fig, axes = plt.subplots(2, 1, figsize=(5, 2), gridspec_kw={'height_ratios': [3, 1]})
-    fig.suptitle(f"SPY GEX Validation — Spot: ${spot:.2f}", fontsize=14, fontweight='bold')
-
-    # --- Chart 1: GEX by Strike ---
-    ax = axes[0]
-    colors = ['#2ecc71' if v > 0 else '#e74c3c' for v in gex_vals / 1e6]
-    ax.bar(strikes, gex_vals / 1e6, width=(strikes[1] - strikes[0]) * 0.7 if len(strikes) > 1 else 1,
-           color=colors, alpha=0.8, edgecolor='white', linewidth=0.3)
-
-    # Smooth line
-    if len(strikes) >= 5:
-        smooth = pd.Series(gex_vals / 1e6).rolling(5, center=True, min_periods=1).mean()
-        ax.plot(strikes, smooth, color='navy', linewidth=1.5, alpha=0.7, label='Smoothed GEX')
-
-    ax.axhline(0, color='black', linewidth=0.8)
-    ax.axvline(spot, color='blue', linewidth=2, linestyle='--', label=f'Spot ${spot:.0f}')
-    if not np.isnan(call_wall):
-        ax.axvline(call_wall, color='green', linewidth=1.5, linestyle=':', label=f'Call Wall ${call_wall:.0f}')
-    if not np.isnan(put_wall):
-        ax.axvline(put_wall, color='red', linewidth=1.5, linestyle=':', label=f'Put Wall ${put_wall:.0f}')
-    if not np.isnan(gamma_flip):
-        ax.axvline(gamma_flip, color='orange', linewidth=1.5, linestyle='-.', label=f'Flip ${gamma_flip:.1f}')
-
-    ax.set_xlabel('Strike')
-    ax.set_ylabel('GEX ($M)')
-    ax.set_title('Gamma Exposure by Strike (All Expirations)')
-    ax.legend(loc='upper left', fontsize=8)
-    ax.grid(axis='y', alpha=0.3)
-
-    # Shade positive/negative zones
-    ax.fill_between(strikes, 0, gex_vals / 1e6,
-                     where=gex_vals > 0, color='green', alpha=0.05)
-    ax.fill_between(strikes, 0, gex_vals / 1e6,
-                     where=gex_vals < 0, color='red', alpha=0.05)
-
-    # Focus x-axis around spot ±5%
-    ax.set_xlim(spot * 0.95, spot * 1.05)
-
-    # --- Chart 2: OI by Strike (calls vs puts) ---
-    ax2 = axes[1]
-    call_oi_by_strike = df[df['Tipo'] == 'CALL'].groupby('Strike')['Tit.'].sum()
-    put_oi_by_strike = df[df['Tipo'] == 'PUT'].groupby('Strike')['Tit.'].sum()
-
-    bar_w = (strikes[1] - strikes[0]) * 0.35 if len(strikes) > 1 else 0.5
-    if not call_oi_by_strike.empty:
-        ax2.bar(call_oi_by_strike.index - bar_w / 2, call_oi_by_strike.values / 1000,
-                width=bar_w, color='#2ecc71', alpha=0.7, label='Call OI')
-    if not put_oi_by_strike.empty:
-        ax2.bar(put_oi_by_strike.index + bar_w / 2, put_oi_by_strike.values / 1000,
-                width=bar_w, color='#e74c3c', alpha=0.7, label='Put OI')
-
-    ax2.axvline(spot, color='blue', linewidth=1.5, linestyle='--')
-    ax2.set_xlabel('Strike')
-    ax2.set_ylabel('OI (thousands)')
-    ax2.set_title('Open Interest by Strike')
-    ax2.legend(fontsize=8)
-    ax2.set_xlim(spot * 0.92, spot * 1.08)
-    ax2.grid(axis='y', alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(SCRIPT_DIR, "spy_gex_validation.png"), dpi=150, bbox_inches='tight')
-    print(f"\n[*] Chart saved: spy_gex_validation.png")
-    plt.show()
-
-    # --- Reference comparison template ---
-    print(f"\n{'='*75}")
-    print("  CROSS-CHECK TEMPLATE (compare with SpotGamma / SqueezeMetrics)")
-    print(f"{'='*75}")
-    print(f"  {'Metric':<20} {'Our Model':>15} {'SpotGamma':>15} {'Delta':>10}")
-    print(f"  {'-'*60}")
-    print(f"  {'Call Wall':<20} {'$'+f'{call_wall:,.0f}':>15} {'(enter)':>15} {'':>10}")
-    print(f"  {'Put Wall':<20} {'$'+f'{put_wall:,.0f}':>15} {'(enter)':>15} {'':>10}")
-    print(f"  {'Gamma Flip':<20} {'$'+f'{gamma_flip:,.1f}':>15} {'(enter)':>15} {'':>10}")
-    print(f"  {'Total GEX':<20} {'$'+f'{total_gex_mil:+,.1f}M':>15} {'(enter)':>15} {'':>10}")
-    print(f"  {'Gamma Env.':<20} {'POS' if total_gex > 0 else 'NEG':>15} {'(enter)':>15} {'':>10}")
-    print(f"\n  Fill in SpotGamma/SqueezeMetrics values to validate model accuracy.")
-    print(f"{'='*75}")
-
-
 # ------------------------------------------------------------
 # Função principal de análise
 # ------------------------------------------------------------
-async def analyze_options(spot: float, underlying: str = "PETR4", ind_mapper: KalmanPriceMapper = None):
+async def analyze_options(spot: float, underlying: str = "PETR4", ind_mapper: KalmanPriceMapper = None, show_plots: bool = False):
        """
        Fetch options data from B3, compute Greeks via Black-Scholes, and analyze.
        Spot is passed as a parameter so the analysis aligns with current price.
        If ind_mapper is provided, $IND equivalents are printed alongside BOVA11 levels.
+       If show_plots is False, all matplotlib charts are suppressed.
        """
 
        # Fetch options data from B3 and compute Greeks
@@ -1023,7 +373,8 @@ async def analyze_options(spot: float, underlying: str = "PETR4", ind_mapper: Ka
        # Ajusta o layout para evitar cortes.
        plt.tight_layout()
        # Exibe o gráfico.
-       plt.show()
+       if show_plots:
+           plt.show()
    
        # ------------------------------------------------------------
        # EXPOSIÇÃO GAMMA (Cliente vs Dealer)
@@ -1163,7 +514,8 @@ async def analyze_options(spot: float, underlying: str = "PETR4", ind_mapper: Ka
            ax.legend(loc='upper right', fontsize=9, framealpha=0.9)
            ax.grid(alpha=0.25)
            plt.tight_layout()
-           plt.show()
+           if show_plots:
+               plt.show()
    
        # ------------------------------------------------------------
        # PAREDES DE CALL/PUT — strike com máxima exposição gamma por lado
@@ -1290,7 +642,8 @@ async def analyze_options(spot: float, underlying: str = "PETR4", ind_mapper: Ka
        # Ajusta o layout.
        plt.tight_layout(rect=[0, 0, 1, 0.94])
        # Exibe o gráfico.
-       plt.show()
+       if show_plots:
+           plt.show()
    
        # ------------------------------------------------------------
        # MÉTRICAS ESTENDIDAS DE ESTRUTURA — Interpretação qualitativa
@@ -1432,6 +785,21 @@ async def analyze_options(spot: float, underlying: str = "PETR4", ind_mapper: Ka
            print(f"  {'Put Wall':<13} {put_wall:>12,.2f} {ind_put_wall:>14,.0f}")
            print(f"  {'Gamma Flip':<13} {gamma_flip:>12,.2f} {ind_gamma_flip:>14,.0f}")
            print(f"  Kalman β = {ind_mapper.beta:,.4f}  α = {ind_mapper.alpha:,.2f}")
+
+           # Delta-neutral hedge estimate
+           print(f"\n  Delta-Neutral Hedge (1 WIN long → buy BOVA11 puts):")
+           try:
+               dn = calculate_delta_neutral_hedge(ind_mapper, df, spot,
+                                                  win_contracts=1, side='put')
+               print(f"    Option:     {dn['ticker']}  (strike {dn['strike']:.2f}, "
+                     f"DTE {dn['dte']}, IV {dn['iv']:.1%})")
+               print(f"    Δ option:   {dn['option_delta']:+.4f}")
+               print(f"    Qty needed: {dn['n_options']} puts")
+               print(f"    Net Δ:      {dn['net_delta']:+.4f}")
+               print(f"    $IND strike: {dn['ind_strike']:,.0f}")
+           except Exception as e:
+               print(f"    [!] Could not estimate: {e}")
+
        else:
            print(f"Spot:        {spot:,.2f}")
            print(f"Call Wall:   {call_wall:,.2f}")
@@ -1446,29 +814,23 @@ async def analyze_options(spot: float, underlying: str = "PETR4", ind_mapper: Ka
        print(df.columns)
 
 async def main():
-    if VALIDATION_MODE == "SPY":
-        # SPY Validation Mode — no MT5 needed
-        print(f"Running SPY GEX Validation Mode...")
-        await analyze_spy_validation()
-    else:
-        # BOVA11 Mode — requires MetaTrader 5
-        mt5_conn = MT5Connector()
+    mt5_conn = MT5Connector()
 
-        # Build Kalman mapper: BOVA11 ↔ $IND
-        try:
-            ind_mapper = build_ind_bova11_mapper(mt5_conn)
-        except Exception as e:
-            print(f"[!] Could not build IND↔BOVA11 mapper: {e}")
-            ind_mapper = None
+    # Build Kalman mapper: BOVA11 ↔ $IND
+    try:
+        ind_mapper = build_ind_bova11_mapper(mt5_conn)
+    except Exception as e:
+        print(f"[!] Could not build IND↔BOVA11 mapper: {e}")
+        ind_mapper = None
 
-        for asset in ASSET_SYMBOL:
-            print(f"\n{'#'*80}\nAnalyzing {asset}...\n{'#'*80}")
-            symbol_info = mt5_conn.get_symbol_info(asset)
-            spot_price = (symbol_info.bid + symbol_info.ask) / 2
-            print(f"Analyzing options data for {asset} with spot price {spot_price:.2f}...")
-            # Pass ind_mapper only when analyzing BOVA11
-            mapper_for_asset = ind_mapper if asset == "BOVA11" else None
-            await analyze_options(spot_price, asset, ind_mapper=mapper_for_asset)
+    for asset in ASSET_SYMBOL:
+        print(f"\n{'#'*80}\nAnalyzing {asset}...\n{'#'*80}")
+        symbol_info = mt5_conn.get_symbol_info(asset)
+        spot_price = (symbol_info.bid + symbol_info.ask) / 2
+        print(f"Analyzing options data for {asset} with spot price {spot_price:.2f}...")
+        # Pass ind_mapper only when analyzing BOVA11
+        mapper_for_asset = ind_mapper if asset == "BOVA11" else None
+        await analyze_options(spot_price, asset, ind_mapper=mapper_for_asset)
 # ------------------------------------------------------------
 # Exemplo de uso (descomente para executar)
 # ------------------------------------------------------------
