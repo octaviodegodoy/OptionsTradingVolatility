@@ -97,10 +97,11 @@ class Utils:
             delta = round(delta, 2)
             iv = iv * 100  # Convert to percentage
             iv_call_brentq = iv_call_brentq * 100  # Convert to percentage
+            session_vol = option_info.session_volume if hasattr(option_info, 'session_volume') else 0
             if option_type == CALL_OPTION:
-                call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price, 'strike': K}
+                call_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price, 'strike': K, 'session_volume': session_vol}
             elif option_type == PUT_OPTION:
-                put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price, 'strike': K}
+                put_deltas_dict[delta] = {'iv': round(iv, 2), 'option_name': option_name, 'price': option_market_price, 'strike': K, 'session_volume': session_vol}
 
         return call_deltas_dict, put_deltas_dict
         
