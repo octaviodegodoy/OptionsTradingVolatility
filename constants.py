@@ -1,21 +1,21 @@
 PERIODS = 60
 SHIFT_PERIODS = 0 
 MAGIC_NUMBER = 345346
-JUROS_DI_ANUAL = ['F','G','H','J','K','M','N','Q','U','V','X','Z']
 CALL_OPTION = 0
 PUT_OPTION = 1
 UNIX_DAYS_IN_SECONDS = 60*60*24
 MIN_DAYS_TO_EXPIRY = 35*UNIX_DAYS_IN_SECONDS # 45 days in seconds
+MIN_BIZ_DAYS_TO_EXPIRY = 25  # minimum business days ahead for expiration selection
 STRIKE_PRICE_OFFSET = 0.05 # 5% above and below current price
 TYPE_BUY = 0
 TYPE_SELL = 1
-OPTION_PRICE_OFFSET = 0.10 # 10% above and below current price
 ASSET_SYMBOL = ["BOVA11", "VALE3", "PETR4"] #, "GOAU4", "BBAS3", "BRAV3", "ITUB4", "BBDC4", "MGLU3", "RAIZ4"]
 GARCH_SAMPLE_SIZE = 55  # Number of trading days in a year
 ANNUAL_TRADING_DAYS = 252
 IV_DIFF_THRESHOLD = 0.01  # 5% difference threshold for implied volatility
 STEEP_THRESHOLD = 2.0 # Minimum steepness threshold in percentage points per delta
 DIFF_IV_GARCH_PUTS_THRESHOLD_PCT = 3 # 1% difference threshold for IV of ATM puts compared to GARCH volatility
+MIN_PUT_IV = 15.0 # Minimum IV (%) for ATM put to be considered tradeable
 IV_DIFF_THRESHOLD_CALLS = 1.0 # Threshold for IV difference between call strikes to consider for trading
 MIN_CALL_SESSION_VOLUME = 0 # Minimum session volume for a call option to be eligible for pair scanning
 

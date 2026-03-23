@@ -1,14 +1,13 @@
-from datetime import datetime, time
+from datetime import datetime
 import logging
 import asyncio
 from constants import (
     ASSET_SYMBOL, DIFF_IV_GARCH_PUTS_THRESHOLD_PCT, GARCH_SAMPLE_SIZE,
-    IV_DIFF_THRESHOLD_CALLS, MIN_CALL_SESSION_VOLUME, STEEP_THRESHOLD,
+    IV_DIFF_THRESHOLD_CALLS, MIN_CALL_SESSION_VOLUME, MIN_PUT_IV, STEEP_THRESHOLD,
     ACTIVE_STRATEGY, VOLATILITY_SKEW,
 )
 from mt5_connector import MT5Connector
 from functions.quant_functions import QuantCalculation
-import pandas as pd
 import numpy as np
 from utils import Utils
 
@@ -30,12 +29,30 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
         logger.error(f"Failed to select {asset}")
         return
 
-    symbol_info = mt5_conn.get_symbol_info(asset)
+    # Wait until MT5 streams live tick data for the underlying
+    for _ in range(10):
+        tick = mt5_conn.get_mt5_connector().symbol_info_tick(asset)
+        if tick is not None and tick.bid > 0 and tick.ask > 0:
+            break
+        logger.info(f"Waiting for {asset} tick data after symbol_select...")
+        await asyncio.sleep(1)
+    else:
+        logger.error(f"{asset} still has no tick data after 10 s – check Market Watch")
+        return
+
+    symbol_info = mt5_conn.get_symbol_info(asset)  # initial fetch for chain loading
     chain_options = mt5_conn.get_option_names_by_expiration_time(asset)
     logger.info(f"Options Chain for {asset} retrieved {len(chain_options.values())} options.")
     expiration_time = list(chain_options.keys())[0]
 
     while selected_asset:
+       mt5_conn.symbol_select(asset, True)  # ensure symbol stays in Market Watch
+       symbol_info = mt5_conn.get_symbol_info(asset)
+       if symbol_info.bid == 0.0 or symbol_info.ask == 0.0:
+           logger.warning(f"Underlying {asset} bid/ask is 0.0, waiting for market data...")
+           await asyncio.sleep(5)
+           continue
+
        spot_prices_data = mt5_conn.get_data(asset, mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0)["close"].values
        garch_vol = quant_calc.agarch_estimation(spot_prices_data)*100
        logger.info(f"GARCH Volatility : {garch_vol:.2f}%")
@@ -64,15 +81,14 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
        atm_price = (symbol_info.bid + symbol_info.ask) / 2
        print(f"ATM strike price for {asset} is approximately {atm_price}")
    
-       put_strikes = [v['strike'] for v in puts_dict.values()]
        put_strikes_and_ivs = [(v['strike'], v['iv']) for v in puts_dict.values()]
-       put_strikes = set(put_strikes)
-       sorted_strikes = sorted(put_strikes)
-       print(f"All put strikes : {sorted(put_strikes)}")
+       sorted_strikes = sorted({v['strike'] for v in puts_dict.values()})
+       print(f"All put strikes : {sorted_strikes}")
        atm_strike = min(sorted_strikes, key=lambda x: abs(x - atm_price))
    
        print(f"ATM strike determined from available strikes: {atm_strike}")
-       atm_strikes = sorted_strikes[max(0, sorted_strikes.index(atm_strike)-1):sorted_strikes.index(atm_strike)+1]
+       atm_idx = sorted_strikes.index(atm_strike)
+       atm_strikes = sorted_strikes[max(0, atm_idx - 1):min(len(sorted_strikes), atm_idx + 2)]
        print(f"ATM strikes: {atm_strikes}")
    
        atm_ivs = [(iv, strike) for strike, iv in put_strikes_and_ivs if strike in atm_strikes]
@@ -84,12 +100,10 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
        iv_garch_diff_pct = min_iv_strike[0] - garch_vol
        print(f"Strike with minimum IV: {min_iv_strike[1]}, IV: {min_iv_strike[0]} and GARCH volatility: {garch_vol:.2f}% and puts steeper? {result} and min IV at ATM puts is {iv_garch_diff_pct:.2f}% different from GARCH volatility (threshold was {DIFF_IV_GARCH_PUTS_THRESHOLD_PCT} pp)")
        put_name_min_iv = next((v['option_name'] for v in puts_dict.values() if v['strike'] == min_iv_strike[1]), None)
-       ## verify put side steepness and if IV of ATM puts is significantly lower than GARCH volatility
-       print(f"Put option with minimum IV at ATM strikes: {put_name_min_iv} and steep threshold is {STEEP_THRESHOLD} pp/delta")
       
-       put_condition = iv_garch_diff_pct <= DIFF_IV_GARCH_PUTS_THRESHOLD_PCT or result
+       put_condition = (iv_garch_diff_pct <= DIFF_IV_GARCH_PUTS_THRESHOLD_PCT or result) and min_iv_strike[0] >= MIN_PUT_IV
 
-       print(f"Put condition for buying: {put_condition} (IV difference from GARCH: {iv_garch_diff_pct:.2f}% and puts steeper? {result})")       
+       print(f"Put condition for buying: {put_condition} (IV difference from GARCH: {iv_garch_diff_pct:.2f}% and puts steeper? {result} and ATM IV {min_iv_strike[0]:.2f}% >= MIN_PUT_IV {MIN_PUT_IV}%)")       
 
        # ── Scan all eligible call pairs for minimum IV difference ──
        # Filter calls by session volume and delta range (0.25 – 0.75)
@@ -100,16 +114,26 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
        liquid_deltas = sorted(liquid_calls.keys())
        print(f"Liquid calls (vol >= {MIN_CALL_SESSION_VOLUME}): {[(d, liquid_calls[d]['strike'], liquid_calls[d]['session_volume']) for d in liquid_deltas]}")
 
+       # Compute mean and std of liquid call deltas for the 2-std distance filter
        best_pair = None  # (sell_delta, buy_delta, iv_diff)
 
        if len(liquid_deltas) >= 2:
-           for i, sell_delta in enumerate(liquid_deltas):
-               for buy_delta in liquid_deltas[i + 1:]:
-                   sell_iv = liquid_calls[sell_delta]['iv']
-                   buy_iv  = liquid_calls[buy_delta]['iv']
+           avg_delta = sum(liquid_deltas) / len(liquid_deltas)
+           std_delta = (sum((d - avg_delta) ** 2 for d in liquid_deltas) / len(liquid_deltas)) ** 0.5
+           required_gap = 2 * std_delta
+           print(f"Call delta stats: mean={avg_delta:.4f}, std={std_delta:.4f}, required gap (2σ)={required_gap:.4f}")
+
+           # sell = upper delta (higher), buy = lower delta (lower)
+           for i, buy_delta_cand in enumerate(liquid_deltas):
+               for sell_delta_cand in liquid_deltas[i + 1:]:
+                   delta_gap = sell_delta_cand - buy_delta_cand
+                   if delta_gap < required_gap:
+                       continue  # too close, skip
+                   sell_iv = liquid_calls[sell_delta_cand]['iv']
+                   buy_iv  = liquid_calls[buy_delta_cand]['iv']
                    pair_diff = sell_iv - buy_iv  # want sell IV minimised vs buy IV
                    if best_pair is None or pair_diff < best_pair[2]:
-                       best_pair = (sell_delta, buy_delta, pair_diff)
+                       best_pair = (sell_delta_cand, buy_delta_cand, pair_diff)
 
        if best_pair is not None:
            sell_delta, buy_delta, iv_diff = best_pair
@@ -131,7 +155,7 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
        min_amount = 100
        put_atm_delta = abs(put_atm_delta) if put_atm_delta is not None else 0.0
        put_amount = float(round(min_amount/put_atm_delta/min_amount)*min_amount if put_atm_delta is not None and put_atm_delta != 0 else min_amount)
-       call_delta = buy_delta - sell_delta if best_pair is not None else 0
+       call_delta = sell_delta - buy_delta if best_pair is not None else 0  # sell(upper) - buy(lower)
        call_amount = float(round(min_amount/call_delta/min_amount)*min_amount if call_delta != 0 else min_amount)
            
        puts_positions_total = utils.put_options_count()

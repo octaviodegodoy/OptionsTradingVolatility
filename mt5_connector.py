@@ -376,28 +376,45 @@ class MT5Connector:
         return list(sorted_options_call_names.values())
     
     def get_option_names_by_expiration_time(self,symbol):
+        from constants import MIN_BIZ_DAYS_TO_EXPIRY, BRAZILIAN_HOLIDAYS
         
-        time_now = int(time.time())
-        min_expiration = time_now + MIN_DAYS_TO_EXPIRY #10 days ahead
+        # Compute target date: next Friday on or after 25 business days from today
+        holidays = [
+            datetime.strptime(h, "%Y-%m-%d").date() if isinstance(h, str) else h
+            for h in BRAZILIAN_HOLIDAYS
+        ]
+        today = datetime.now().date()
+        biz_count = 0
+        current = today
+        while biz_count < MIN_BIZ_DAYS_TO_EXPIRY:
+            current += timedelta(days=1)
+            if current.weekday() < 5 and current not in holidays:
+                biz_count += 1
+        # Advance to next Friday (weekday 4) if not already a Friday
+        days_until_friday = (4 - current.weekday()) % 7
+        target_friday = current + timedelta(days=days_until_friday)
+        target_ts = int(datetime.combine(target_friday, datetime.min.time()).timestamp())
+        self.logger.info(f"Expiration target: next Friday after {MIN_BIZ_DAYS_TO_EXPIRY} biz days → {target_friday} (ts {target_ts})")
+
         symbol_prefix = symbol[:4]
         group = f"*{symbol_prefix}*,!{symbol}*"
         options_symbols = mt5.symbols_get(group)
         expiration_times = set()
         chain_expiration = {}
-        
-       # get the first expiration time after min_expiration")
+
         for s in options_symbols:
-            
-            if s.expiration_time > min_expiration and s.option_strike > 0:
+            if s.expiration_time >= target_ts and s.option_strike > 0:
                expiration_times.add(s.expiration_time)
 
-                       
-        sorted_expiration_times = list(dict.fromkeys(expiration_times))
-        sorted_expiration_times.sort()
+        sorted_expiration_times = sorted(expiration_times)
 
-        filtered_names = [symbol.name for symbol in options_symbols if symbol.expiration_time == sorted_expiration_times[0] and symbol.option_strike > 0]
+        if not sorted_expiration_times:
+            self.logger.warning("No expiration times found after target date")
+            return chain_expiration
 
-        chain_expiration[sorted_expiration_times[0]] = filtered_names
+        chosen_expiry = sorted_expiration_times[0]
+        filtered_names = [sym.name for sym in options_symbols if sym.expiration_time == chosen_expiry and sym.option_strike > 0]
+        chain_expiration[chosen_expiry] = filtered_names
 
         return chain_expiration
         
