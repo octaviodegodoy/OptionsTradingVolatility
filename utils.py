@@ -61,6 +61,20 @@ class Utils:
             return False
                       
         return True
+
+    def get_option_info_with_quote(self, option_name, retries=2, wait_seconds=0.05):
+        """
+        Ensure option symbol is selected and retry quote fetch when bid/ask are zero.
+        """
+        last_info = None
+        for attempt in range(retries + 1):
+            self.mt5_conn.symbol_select(option_name, True)
+            last_info = self.mt5_conn.get_symbol_info(option_name)
+            if last_info is not None and last_info.bid > 0.0 and last_info.ask > 0.0:
+                return last_info
+            if attempt < retries:
+                time.sleep(wait_seconds)
+        return last_info
     
     def get_calls_and_puts_data(self, chain_options, symbol_info):
         call_deltas_dict = {}
@@ -78,12 +92,13 @@ class Utils:
         
         for option_name in options_names_list:
             selected_option = self.mt5_conn.symbol_select(option_name,True)
-            option_info = self.mt5_conn.get_symbol_info(option_name)
+            option_info = self.get_option_info_with_quote(option_name)
             
             if not selected_option:
                 self.logger.error(f"Failed to select option {option_name}")
                 continue
             if option_info is None or option_info.bid == 0.0 or option_info.ask == 0.0:
+                self.logger.debug(f"Skipping {option_name}: no valid bid/ask after symbol_select retries")
                 continue
 
             bid_option_price = option_info.bid

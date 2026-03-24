@@ -4,12 +4,12 @@ MAGIC_NUMBER = 345346
 CALL_OPTION = 0
 PUT_OPTION = 1
 UNIX_DAYS_IN_SECONDS = 60*60*24
-MIN_DAYS_TO_EXPIRY = 10*UNIX_DAYS_IN_SECONDS # 45 days in seconds
-MIN_BIZ_DAYS_TO_EXPIRY = 20  # minimum business days ahead for expiration selection
+MIN_DAYS_TO_EXPIRY = 2*UNIX_DAYS_IN_SECONDS # 45 days in seconds
+MIN_BIZ_DAYS_TO_EXPIRY = 2  # minimum business days ahead for expiration selection
 STRIKE_PRICE_OFFSET = 0.05 # 5% above and below current price
 TYPE_BUY = 0
 TYPE_SELL = 1
-ASSET_SYMBOL = ["BOVA11", "VALE3", "PETR4"] #, "GOAU4", "BBAS3", "BRAV3", "ITUB4", "BBDC4", "MGLU3", "RAIZ4"]
+ASSET_SYMBOL = ["DOLF28","BOVA11", "VALE3", "PETR4"] #, "GOAU4", "BBAS3", "BRAV3", "ITUB4", "BBDC4", "MGLU3", "RAIZ4"]
 GARCH_SAMPLE_SIZE = 55  # Number of trading days in a year
 ANNUAL_TRADING_DAYS = 252
 IV_DIFF_THRESHOLD = 0.01  # 5% difference threshold for implied volatility
@@ -18,12 +18,16 @@ DIFF_IV_GARCH_PUTS_THRESHOLD_PCT = 3 # 1% difference threshold for IV of ATM put
 MIN_PUT_IV = 15.0 # Minimum IV (%) for ATM put to be considered tradeable
 IV_DIFF_THRESHOLD_CALLS = 1.0 # Threshold for IV difference between call strikes to consider for trading
 MIN_CALL_SESSION_VOLUME = 0 # Minimum session volume for a call option to be eligible for pair scanning
+STRADDLE_MAX_DELTA_IMBALANCE = 0.10  # Target |call_delta + put_delta| for near delta-neutral straddle
+STRADDLE_ENTRY_MAX_NET_IV = 22.0  # Entry only if straddle net IV <= this level (%), and this cap is below GARCH
+STRADDLE_SLEEP_SECONDS = 25
 
 # ── Strategy constants ───────────────────────────────────────
 # Add new strategy names here as you implement them.
 VOLATILITY_SKEW = "VOLATILITY_SKEW"
+STRADDLE = "STRADDLE"
 
-ACTIVE_STRATEGY = VOLATILITY_SKEW
+ACTIVE_STRATEGY = STRADDLE
 
 BRAZILIAN_HOLIDAYS = [
     "2026-02-16",

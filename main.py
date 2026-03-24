@@ -3,8 +3,9 @@ import logging
 import asyncio
 from constants import (
     ASSET_SYMBOL, DIFF_IV_GARCH_PUTS_THRESHOLD_PCT, GARCH_SAMPLE_SIZE,
-    IV_DIFF_THRESHOLD_CALLS, MIN_PUT_IV, STEEP_THRESHOLD,
-    ACTIVE_STRATEGY, VOLATILITY_SKEW,
+    IV_DIFF_THRESHOLD_CALLS, MIN_PUT_IV, STEEP_THRESHOLD, ANNUAL_TRADING_DAYS,
+    ACTIVE_STRATEGY, VOLATILITY_SKEW, STRADDLE,
+    STRADDLE_MAX_DELTA_IMBALANCE, STRADDLE_SLEEP_SECONDS,
 )
 from mt5_connector import MT5Connector
 from functions.quant_functions import QuantCalculation
@@ -184,9 +185,210 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
        await asyncio.sleep(25)    
 
 
+async def strategy_straddle(mt5_conn, quant_calc, utils, logger):
+    """
+    STRADDLE strategy:
+    - Buy call + buy put on the same strike
+    - Select pair with delta-neutral score as close to zero as possible
+      where score = |call_delta + put_delta|
+    """
+    asset = ASSET_SYMBOL[0]
+
+    selected_asset = mt5_conn.symbol_select(asset, True)
+    if not selected_asset:
+        logger.error(f"Failed to select {asset}")
+        return
+
+    for _ in range(10):
+        tick = mt5_conn.get_mt5_connector().symbol_info_tick(asset)
+        if tick is not None and tick.bid > 0 and tick.ask > 0:
+            break
+        logger.info(f"Waiting for {asset} tick data after symbol_select...")
+        await asyncio.sleep(1)
+    else:
+        logger.error(f"{asset} still has no tick data after 10 s – check Market Watch")
+        return
+
+    last_rebalance_spot = None
+    first_delta_neutral_entry_done = False
+
+    while selected_asset:
+        mt5_conn.symbol_select(asset, True)
+        symbol_info = mt5_conn.get_symbol_info(asset)
+        if symbol_info is None or symbol_info.bid == 0.0 or symbol_info.ask == 0.0:
+            logger.warning(f"Underlying {asset} bid/ask is invalid, waiting for market data...")
+            await asyncio.sleep(5)
+            continue
+
+        spot_prices_data = mt5_conn.get_data(
+            asset,
+            mt5_conn.get_mt5_connector().TIMEFRAME_D1,
+            GARCH_SAMPLE_SIZE,
+            0,
+        )["close"].values
+        garch_vol = quant_calc.agarch_estimation(spot_prices_data) * 100
+        garch_vol_change = garch_vol / np.sqrt(ANNUAL_TRADING_DAYS)
+        logger.info(f"GARCH Volatility for STRADDLE: {garch_vol:.2f}% (vol change={garch_vol_change:.2f}% using sqrt({ANNUAL_TRADING_DAYS}))")
+
+        chain_options = mt5_conn.get_option_names_by_expiration_time(asset)
+        if not chain_options:
+            logger.warning("No option chain returned for selected expiration")
+            await asyncio.sleep(STRADDLE_SLEEP_SECONDS)
+            continue
+
+        calls_dict, puts_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
+        if not calls_dict or not puts_dict:
+            logger.warning("calls_dict or puts_dict is empty, skipping iteration")
+            await asyncio.sleep(STRADDLE_SLEEP_SECONDS)
+            continue
+
+        # Build strike maps to enforce true straddles (same strike call+put)
+        call_by_strike = {}
+        for call_delta, call_data in calls_dict.items():
+            call_by_strike[call_data['strike']] = (call_delta, call_data)
+
+        put_by_strike = {}
+        for put_delta, put_data in puts_dict.items():
+            put_by_strike[put_data['strike']] = (put_delta, put_data)
+
+        common_strikes = sorted(set(call_by_strike.keys()) & set(put_by_strike.keys()))
+        if not common_strikes:
+            logger.warning("No common strikes between calls and puts for straddle")
+            await asyncio.sleep(STRADDLE_SLEEP_SECONDS)
+            continue
+
+        logger.info(f"STRADDLE analyzed common strikes ({len(common_strikes)}): {common_strikes}")
+
+        atm_price = (symbol_info.bid + symbol_info.ask) / 2
+
+        # Pick the 2 nearest ATM common strikes, then choose the pair with minimum net IV
+        atm_sorted_strikes = sorted(common_strikes, key=lambda s: abs(s - atm_price))[:2]
+        logger.info(f"STRADDLE 2 nearest ATM common strikes: {atm_sorted_strikes} (spot={atm_price:.2f})")
+
+        best_pair = None
+        for strike in atm_sorted_strikes:
+            call_delta, call_data = call_by_strike[strike]
+            put_delta, put_data = put_by_strike[strike]
+            net_iv = (call_data['iv'] + put_data['iv']) / 2
+            neutrality_score = abs(call_delta + put_delta)
+            candidate = (net_iv, neutrality_score, strike, call_delta, put_delta, call_data, put_data)
+            logger.info(
+                f"  strike={strike}: call_iv={call_data['iv']:.2f}%, put_iv={put_data['iv']:.2f}%, "
+                f"net_iv={net_iv:.2f}%, |Δc+Δp|={neutrality_score:.4f}"
+            )
+            if best_pair is None or candidate < best_pair:
+                best_pair = candidate
+
+        _, neutrality_score, strike, call_delta, put_delta, call_data, put_data = best_pair
+        call_symbol = call_data['option_name']
+        put_symbol = put_data['option_name']
+        call_iv = call_data['iv']
+        put_iv = put_data['iv']
+        straddle_net_iv = (call_iv + put_iv) / 2
+        straddle_vol_change = straddle_net_iv / np.sqrt(ANNUAL_TRADING_DAYS)
+
+        logger.info(
+            f"Best straddle pair: strike={strike}, call={call_symbol} (Δ={call_delta:.2f}, IV={call_iv:.2f}%), "
+            f"put={put_symbol} (Δ={put_delta:.2f}, IV={put_iv:.2f}%), neutrality |Δc+Δp|={neutrality_score:.4f}, "
+            f"net IV={straddle_net_iv:.2f}% (vol change={straddle_vol_change:.2f}% using sqrt({ANNUAL_TRADING_DAYS}))"
+        )
+
+        puts_positions_total = utils.put_options_count()
+        call_positions_total = utils.call_options_count()
+        has_open_straddle = puts_positions_total > 0 and call_positions_total > 0
+
+        if first_delta_neutral_entry_done and has_open_straddle and last_rebalance_spot is None:
+            last_rebalance_spot = atm_price
+            logger.info(f"Initialized STRADDLE rebalance anchor at spot={last_rebalance_spot:.2f}")
+
+        rebalance_due = False
+        spot_move_pct = 0.0
+        if first_delta_neutral_entry_done and has_open_straddle and last_rebalance_spot and last_rebalance_spot > 0:
+            spot_move_pct = abs((atm_price - last_rebalance_spot) / last_rebalance_spot) * 100
+            rebalance_due = spot_move_pct >= straddle_vol_change
+
+        if first_delta_neutral_entry_done and has_open_straddle and not rebalance_due:
+            logger.info(
+                f"Open STRADDLE held: spot move={spot_move_pct:.2f}% < trigger={straddle_vol_change:.2f}% "
+                f"(rebalance anchor={last_rebalance_spot:.2f}, current spot={atm_price:.2f})"
+            )
+            await asyncio.sleep(STRADDLE_SLEEP_SECONDS)
+            continue
+
+        if first_delta_neutral_entry_done and has_open_straddle and rebalance_due:
+            logger.info(
+                f"Rebalancing STRADDLE: spot move={spot_move_pct:.2f}% >= trigger={straddle_vol_change:.2f}% "
+                f"from anchor={last_rebalance_spot:.2f} to spot={atm_price:.2f}. Closing strategy positions to re-hedge delta neutral."
+            )
+            mt5_conn.close_all_positions()
+            await asyncio.sleep(1)
+            puts_positions_total = utils.put_options_count()
+            call_positions_total = utils.call_options_count()
+
+        delta_neutral_condition = neutrality_score <= STRADDLE_MAX_DELTA_IMBALANCE
+        first_entry_vol_garch_condition = True
+        if puts_positions_total == 0 and call_positions_total == 0 and last_rebalance_spot is None:
+            first_entry_vol_garch_condition = straddle_net_iv <= garch_vol
+        straddle_allowed = (
+            delta_neutral_condition and
+            first_entry_vol_garch_condition and
+            puts_positions_total == 0 and
+            call_positions_total == 0
+        )
+
+        if not straddle_allowed:
+            logger.info(
+                f"STRADDLE not placed: allowed={straddle_allowed}, |Δc+Δp|={neutrality_score:.4f}, "
+                f"threshold={STRADDLE_MAX_DELTA_IMBALANCE}, net_iv={straddle_net_iv:.2f}%, garch={garch_vol:.2f}%, "
+                f"first_entry_vol_garch={first_entry_vol_garch_condition}, "
+                f"open puts={puts_positions_total}, open calls={call_positions_total}"
+            )
+            await asyncio.sleep(STRADDLE_SLEEP_SECONDS)
+            continue
+
+        call_symbol_info = mt5_conn.get_symbol_info(call_symbol)
+        put_symbol_info = mt5_conn.get_symbol_info(put_symbol)
+        if (
+            call_symbol_info is None or put_symbol_info is None or
+            call_symbol_info.ask <= 0 or put_symbol_info.ask <= 0
+        ):
+            logger.warning("Selected straddle legs have invalid ask price; skipping")
+            await asyncio.sleep(STRADDLE_SLEEP_SECONDS)
+            continue
+
+        straddle_amount = 100.0
+        logger.info(
+            f"Placing STRADDLE: BUY {call_symbol} @ {call_symbol_info.ask:.4f} and "
+            f"BUY {put_symbol} @ {put_symbol_info.ask:.4f} volume={straddle_amount}"
+        )
+
+        mt5_conn.place_order(
+            call_symbol,
+            MT5Connector.ORDER_TYPE_BUY,
+            straddle_amount,
+            call_symbol_info.ask,
+            10,
+            f"SC d={call_delta:.2f} iv={call_iv:.1f}",
+        )
+        mt5_conn.place_order(
+            put_symbol,
+            MT5Connector.ORDER_TYPE_BUY,
+            straddle_amount,
+            put_symbol_info.ask,
+            10,
+            f"SP d={put_delta:.2f} iv={put_iv:.1f}",
+        )
+
+        first_delta_neutral_entry_done = True
+        last_rebalance_spot = atm_price
+
+        await asyncio.sleep(STRADDLE_SLEEP_SECONDS)
+
+
 # ── Strategy dispatcher ──────────────────────────────────────
 STRATEGY_MAP = {
     VOLATILITY_SKEW: strategy_volatility_skew,
+    STRADDLE: strategy_straddle,
 }
 
 
