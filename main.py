@@ -3,7 +3,7 @@ import logging
 import asyncio
 from constants import (
     ASSET_SYMBOL, DIFF_IV_GARCH_PUTS_THRESHOLD_PCT, GARCH_SAMPLE_SIZE,
-    IV_DIFF_THRESHOLD_CALLS, MIN_CALL_SESSION_VOLUME, MIN_PUT_IV, STEEP_THRESHOLD,
+    IV_DIFF_THRESHOLD_CALLS, MIN_PUT_IV, STEEP_THRESHOLD,
     ACTIVE_STRATEGY, VOLATILITY_SKEW,
 )
 from mt5_connector import MT5Connector
@@ -22,7 +22,7 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
     - Long ATM puts when IV is cheap vs GARCH or put skew is steep
     - Call vertical spreads when IV difference between strikes is compressed
     """
-    asset = ASSET_SYMBOL[2]
+    asset = ASSET_SYMBOL[0]
 
     selected_asset = mt5_conn.symbol_select(asset, True)
     if not selected_asset:
@@ -106,13 +106,13 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
        print(f"Put condition for buying: {put_condition} (IV difference from GARCH: {iv_garch_diff_pct:.2f}% and puts steeper? {result} and ATM IV {min_iv_strike[0]:.2f}% >= MIN_PUT_IV {MIN_PUT_IV}%)")       
 
        # ── Scan all eligible call pairs for minimum IV difference ──
-       # Filter calls by session volume and delta range (0.25 – 0.75)
+       # Filter calls by delta range (0.25 – 0.75)
        liquid_calls = {
            delta: data for delta, data in calls_dict.items()
-           if 0.25 < delta < 0.75 and data.get('session_volume', 0) >= MIN_CALL_SESSION_VOLUME
+           if 0.25 < delta < 0.75
        }
        liquid_deltas = sorted(liquid_calls.keys())
-       print(f"Liquid calls (vol >= {MIN_CALL_SESSION_VOLUME}): {[(d, liquid_calls[d]['strike'], liquid_calls[d]['session_volume']) for d in liquid_deltas]}")
+       print(f"Eligible calls: {[(d, liquid_calls[d]['strike'], liquid_calls[d]['session_volume']) for d in liquid_deltas]}")
 
        # Compute mean and std of liquid call deltas for the 2-std distance filter
        best_pair = None  # (sell_delta, buy_delta, iv_diff)
@@ -141,12 +141,12 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
            iv_buy  = liquid_calls[buy_delta]['iv']
            call_sell = liquid_calls[sell_delta]['option_name']
            call_buy  = liquid_calls[buy_delta]['option_name']
-           print(f"Best call pair → Sell {call_sell} (delta {sell_delta}, IV {iv_sell:.2f}%, strike {liquid_calls[sell_delta]['strike']}, vol {liquid_calls[sell_delta]['session_volume']}) "
-                 f"| Buy {call_buy} (delta {buy_delta}, IV {iv_buy:.2f}%, strike {liquid_calls[buy_delta]['strike']}, vol {liquid_calls[buy_delta]['session_volume']}) "
+           print(f"Best call pair → Sell {call_sell} (delta {sell_delta}, IV {iv_sell:.2f}%, strike {liquid_calls[sell_delta]['strike']}) "
+                 f"| Buy {call_buy} (delta {buy_delta}, IV {iv_buy:.2f}%, strike {liquid_calls[buy_delta]['strike']}) "
                  f"| IV diff {iv_diff:.2f}%")
        else:
            iv_diff = None
-           print("No eligible liquid call pairs found for spread")
+           print("No eligible call pairs found for spread")
 
        orders_type = [mt5_conn.ORDER_TYPE_BUY, mt5_conn.ORDER_TYPE_SELL]
 
