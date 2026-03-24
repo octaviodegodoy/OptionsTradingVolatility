@@ -123,10 +123,10 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
            required_gap = 2 * std_delta
            print(f"Call delta stats: mean={avg_delta:.4f}, std={std_delta:.4f}, required gap (2σ)={required_gap:.4f}")
 
-           # sell = upper delta (higher), buy = lower delta (lower)
-           for i, buy_delta_cand in enumerate(liquid_deltas):
-               for sell_delta_cand in liquid_deltas[i + 1:]:
-                   delta_gap = sell_delta_cand - buy_delta_cand
+           # buy = upper delta (higher), sell = lower delta (lower)
+           for i, sell_delta_cand in enumerate(liquid_deltas):
+               for buy_delta_cand in liquid_deltas[i + 1:]:
+                   delta_gap = buy_delta_cand - sell_delta_cand
                    if delta_gap < required_gap:
                        continue  # too close, skip
                    sell_iv = liquid_calls[sell_delta_cand]['iv']
@@ -155,7 +155,7 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
        min_amount = 100
        put_atm_delta = abs(put_atm_delta) if put_atm_delta is not None else 0.0
        put_amount = float(round(min_amount/put_atm_delta/min_amount)*min_amount if put_atm_delta is not None and put_atm_delta != 0 else min_amount)
-       call_delta = sell_delta - buy_delta if best_pair is not None else 0  # sell(upper) - buy(lower)
+       call_delta = buy_delta - sell_delta if best_pair is not None else 0  # buy(upper) - sell(lower)
        call_amount = float(round(min_amount/call_delta/min_amount)*min_amount if call_delta != 0 else min_amount)
            
        puts_positions_total = utils.put_options_count()
@@ -176,10 +176,10 @@ async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
           logger.info(f"Condition not met for put condition: {put_condition} (IV difference from GARCH: {iv_garch_diff_pct:.2f}% and puts steeper? {result})")
 
        if call_order_allowed:
-            print(f"Placing orders for call spread: Buy {call_buy} and Sell {call_sell} | IV diff {iv_diff:.2f}% <= {IV_DIFF_THRESHOLD_CALLS}%")
+            print(f"Placing orders for call spread: Buy {call_buy} and Sell {call_sell} | IV diff {f'{iv_diff:.2f}' if iv_diff is not None else 'N/A'}% <= {IV_DIFF_THRESHOLD_CALLS}%")
             mt5_conn.place_order_vertical(call_buy, call_sell, orders_type, call_amount, iv_buy, iv_sell)
        else:
-            logger.info(f"Condition not met for call condition: {call_condition} diff threshold is {IV_DIFF_THRESHOLD_CALLS} (IV diff: {iv_diff:.2f}% if iv_diff is not None else 'N/A') for call spread")
+            logger.info(f"Condition not met for call condition: {call_condition} diff threshold is {IV_DIFF_THRESHOLD_CALLS} (IV diff: {f'{iv_diff:.2f}' if iv_diff is not None else 'N/A'}%) for call spread")
             
        await asyncio.sleep(25)    
 

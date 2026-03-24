@@ -135,6 +135,9 @@ class QuantCalculation:
         calls_delta_filtered = delta_calls[calls_mask]
         calls_iv_filtered = call_ivs[calls_mask]
         
+        if len(puts_delta) < 2 or len(calls_delta_filtered) < 2:
+            return False
+        
         # Linear fit: IV = intercept + slope * delta
         slope_put, _ = np.polyfit(puts_delta, put_ivs, 1)
         slope_call, _ = np.polyfit(calls_delta_filtered, calls_iv_filtered, 1)
