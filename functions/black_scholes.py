@@ -168,6 +168,58 @@ class BlackScholesCalculator:
         elif ID == PUT_OPTION:
             return self.fx_put_vol(F, K, T, price, r)
         
+    def implied_volatility(self, F, K, T, market_price, r, option_type=CALL_OPTION,
+                           method='brentq', initial_guess=0.3, max_iter=100, tolerance=1e-6):
+        """
+        Calculate implied volatility using Newton-Raphson or Brent's method.
+
+        Args:
+            F: Forward price
+            K: Strike price
+            T: Time to expiration in trading days
+            market_price: Market price of the option
+            r: Discount factor
+            option_type: CALL_OPTION or PUT_OPTION
+            method: 'newton' or 'brentq'
+            initial_guess: Starting sigma for Newton method
+            max_iter: Maximum iterations
+            tolerance: Convergence tolerance
+
+        Returns:
+            Implied volatility as decimal, or None if calculation fails.
+        """
+        if market_price <= 0 or T <= 0:
+            return None
+
+        def objective(sigma):
+            if sigma <= 0:
+                return 1e10
+            if option_type == CALL_OPTION:
+                return self.black_scholes_call(F, K, T, sigma, r) - market_price
+            elif option_type == PUT_OPTION:
+                return self.black_scholes_put(F, K, T, sigma, r) - market_price
+            return 1e10
+
+        try:
+            if method == 'newton':
+                iv = newton(objective, initial_guess, maxiter=max_iter, tol=tolerance)
+            elif method == 'brentq':
+                iv = brentq(objective, 0.001, 5.0, maxiter=max_iter, xtol=tolerance)
+            else:
+                raise ValueError("method must be 'newton' or 'brentq'")
+
+            if iv < 0 or iv > 5:
+                return None
+            return iv
+        except (RuntimeError, ValueError):
+            try:
+                iv = brentq(objective, 0.0001, 10.0, maxiter=200)
+                if 0 < iv <= 10:
+                    return iv
+            except (RuntimeError, ValueError):
+                pass
+            return None
+
     def fx_gamma(self,F, K, S, T, sigma, r):
         
         x = self.d_1(F, K, T, sigma)
