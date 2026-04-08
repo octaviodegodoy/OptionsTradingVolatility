@@ -236,6 +236,9 @@ async def strategy_straddle(mt5_conn, quant_calc, utils, logger):
             await asyncio.sleep(STRADDLE_SLEEP_SECONDS)
             continue
 
+        expiration_time = next(iter(chain_options.keys()))
+        logger.info(f"Selected Expiration Time: {datetime.fromtimestamp(expiration_time)}")
+
         calls_dict, puts_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
         if not calls_dict or not puts_dict:
             logger.warning("calls_dict or puts_dict is empty, skipping iteration")

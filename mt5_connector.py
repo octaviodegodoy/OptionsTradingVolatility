@@ -5,7 +5,14 @@ from datetime import datetime, timedelta
 import time
 import pandas as pd
 
-from constants import CALL_OPTION, MAGIC_NUMBER, MIN_DAYS_TO_EXPIRY, PERIODS, SHIFT_PERIODS
+from constants import (
+    CALL_OPTION,
+    MAGIC_NUMBER,
+    MIN_DAYS_TO_EXPIRY,
+    PERIODS,
+    SHIFT_PERIODS,
+    TARGET_OPTION_EXPIRY_RANK,
+)
 
 class MT5Connector:
 
@@ -378,7 +385,8 @@ class MT5Connector:
     def get_option_names_by_expiration_time(self,symbol):
         from constants import MIN_BIZ_DAYS_TO_EXPIRY, BRAZILIAN_HOLIDAYS
         
-        # Compute target date: next Friday on or after 25 business days from today
+        # Build the first valid Friday anchor after the minimum biz-day buffer,
+        # then select the Nth upcoming expiry from that point.
         holidays = [
             datetime.strptime(h, "%Y-%m-%d").date() if isinstance(h, str) else h
             for h in BRAZILIAN_HOLIDAYS
@@ -390,21 +398,23 @@ class MT5Connector:
             current += timedelta(days=1)
             if current.weekday() < 5 and current not in holidays:
                 biz_count += 1
-        # Advance to next Friday (weekday 4) if not already a Friday
+
         days_until_friday = (4 - current.weekday()) % 7
         target_friday = current + timedelta(days=days_until_friday)
         target_ts = int(datetime.combine(target_friday, datetime.min.time()).timestamp())
-        self.logger.info(f"Expiration target: next Friday after {MIN_BIZ_DAYS_TO_EXPIRY} biz days → {target_friday} (ts {target_ts})")
+        self.logger.info(
+            f"Expiration anchor: next Friday after {MIN_BIZ_DAYS_TO_EXPIRY} biz days → {target_friday} (ts {target_ts})"
+        )
 
         symbol_prefix = symbol[:4]
         group = f"*{symbol_prefix}*,!{symbol}*"
-        options_symbols = mt5.symbols_get(group)
+        options_symbols = mt5.symbols_get(group) or []
         expiration_times = set()
         chain_expiration = {}
 
         for s in options_symbols:
             if s.expiration_time >= target_ts and s.option_strike > 0:
-               expiration_times.add(s.expiration_time)
+                expiration_times.add(s.expiration_time)
 
         sorted_expiration_times = sorted(expiration_times)
 
@@ -412,8 +422,23 @@ class MT5Connector:
             self.logger.warning("No expiration times found after target date")
             return chain_expiration
 
-        chosen_expiry = sorted_expiration_times[0]
-        filtered_names = [sym.name for sym in options_symbols if sym.expiration_time == chosen_expiry and sym.option_strike > 0]
+        requested_index = max(TARGET_OPTION_EXPIRY_RANK - 1, 0)
+        chosen_index = min(requested_index, len(sorted_expiration_times) - 1)
+
+        if chosen_index < requested_index:
+            self.logger.warning(
+                f"Requested expiry #{TARGET_OPTION_EXPIRY_RANK}, but only {len(sorted_expiration_times)} future expiries were found. Falling back to the last available expiry."
+            )
+
+        chosen_expiry = sorted_expiration_times[chosen_index]
+        filtered_names = [
+            sym.name
+            for sym in options_symbols
+            if sym.expiration_time == chosen_expiry and sym.option_strike > 0
+        ]
+        self.logger.info(
+            f"Selected expiry #{chosen_index + 1}: {datetime.fromtimestamp(chosen_expiry)} with {len(filtered_names)} options"
+        )
         chain_expiration[chosen_expiry] = filtered_names
 
         return chain_expiration
