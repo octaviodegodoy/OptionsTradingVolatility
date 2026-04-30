@@ -27,8 +27,19 @@ STRADDLE_SLEEP_SECONDS = 25
 # Add new strategy names here as you implement them.
 VOLATILITY_SKEW = "VOLATILITY_SKEW"
 STRADDLE = "STRADDLE"
+PUT_SPREAD = "PUT_SPREAD"
 
-ACTIVE_STRATEGY = STRADDLE
+ACTIVE_STRATEGY = PUT_SPREAD
+
+# ── Put Spread strategy parameters ───────────────────────────
+PUT_SPREAD_EXPIRY_RANK = 1          # 1=next expiry, 2=second next, 3=third next
+PUT_SPREAD_SELL_DELTA_MIN = 0.25    # abs(delta) floor for the short put leg
+PUT_SPREAD_SELL_DELTA_MAX = 0.45    # abs(delta) ceiling for the short put leg
+PUT_SPREAD_BUY_DELTA_MIN  = 0.10    # abs(delta) floor for the long put leg
+PUT_SPREAD_BUY_DELTA_MAX  = 0.24    # abs(delta) ceiling for the long put leg
+PUT_SPREAD_MIN_IV_EDGE    = 2.0     # min (sell_iv - garch_vol) in pp to enter
+PUT_SPREAD_MAX_POSITIONS  = 2       # max open put spread sets allowed
+PUT_SPREAD_SLEEP_SECONDS  = 25
 
 BRAZILIAN_HOLIDAYS = [
     "2026-02-16",

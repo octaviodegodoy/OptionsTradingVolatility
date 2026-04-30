@@ -4,8 +4,11 @@ import asyncio
 from constants import (
     ASSET_SYMBOL, DIFF_IV_GARCH_PUTS_THRESHOLD_PCT, GARCH_SAMPLE_SIZE,
     IV_DIFF_THRESHOLD_CALLS, MIN_PUT_IV, STEEP_THRESHOLD, ANNUAL_TRADING_DAYS,
-    ACTIVE_STRATEGY, VOLATILITY_SKEW, STRADDLE,
+    ACTIVE_STRATEGY, VOLATILITY_SKEW, STRADDLE, PUT_SPREAD,
     STRADDLE_MAX_DELTA_IMBALANCE, STRADDLE_SLEEP_SECONDS,
+    PUT_SPREAD_EXPIRY_RANK, PUT_SPREAD_SELL_DELTA_MIN, PUT_SPREAD_SELL_DELTA_MAX,
+    PUT_SPREAD_BUY_DELTA_MIN, PUT_SPREAD_BUY_DELTA_MAX,
+    PUT_SPREAD_MIN_IV_EDGE, PUT_SPREAD_MAX_POSITIONS, PUT_SPREAD_SLEEP_SECONDS,
 )
 from mt5_connector import MT5Connector
 from functions.quant_functions import QuantCalculation
@@ -388,11 +391,173 @@ async def strategy_straddle(mt5_conn, quant_calc, utils, logger):
         await asyncio.sleep(STRADDLE_SLEEP_SECONDS)
 
 
-# ── Strategy dispatcher ──────────────────────────────────────
+async def strategy_put_spread(mt5_conn, quant_calc, utils, logger):
+    """
+    PUT_SPREAD strategy — bull put spread (credit spread):
+    - Sell a moderately OTM put (short leg, higher strike)
+    - Buy a further OTM put (long leg, lower strike, protection)
+    - Enter when short-put IV is sufficiently above GARCH volatility
+      (expensive premium = edge for the seller)
+    - Expiry is selected by PUT_SPREAD_EXPIRY_RANK (1=next, 2=second, 3=third)
+    """
+    asset = ASSET_SYMBOL[0]
+
+    selected_asset = mt5_conn.symbol_select(asset, True)
+    if not selected_asset:
+        logger.error(f"Failed to select {asset}")
+        return
+
+    for _ in range(10):
+        tick = mt5_conn.get_mt5_connector().symbol_info_tick(asset)
+        if tick is not None and tick.bid > 0 and tick.ask > 0:
+            break
+        logger.info(f"Waiting for {asset} tick data after symbol_select...")
+        await asyncio.sleep(1)
+    else:
+        logger.error(f"{asset} still has no tick data after 10 s – check Market Watch")
+        return
+
+    while True:
+        mt5_conn.symbol_select(asset, True)
+        symbol_info = mt5_conn.get_symbol_info(asset)
+        if symbol_info is None or symbol_info.bid == 0.0 or symbol_info.ask == 0.0:
+            logger.warning(f"Underlying {asset} bid/ask is invalid, waiting...")
+            await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
+            continue
+
+        # ── GARCH vol ──────────────────────────────────────────────────────────
+        spot_prices_data = mt5_conn.get_data(
+            asset,
+            mt5_conn.get_mt5_connector().TIMEFRAME_D1,
+            GARCH_SAMPLE_SIZE,
+            0,
+        )["close"].values
+        garch_vol = quant_calc.agarch_estimation(spot_prices_data) * 100
+        logger.info(f"PUT_SPREAD | GARCH vol: {garch_vol:.2f}%")
+
+        # ── Option chain for the chosen expiry rank ────────────────────────────
+        chain_options = mt5_conn.get_option_names_by_expiration_time(
+            asset, expiry_rank_override=PUT_SPREAD_EXPIRY_RANK
+        )
+        if not chain_options:
+            logger.warning("No option chain returned for selected expiry rank")
+            await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
+            continue
+
+        expiration_time = next(iter(chain_options.keys()))
+        logger.info(f"PUT_SPREAD | Expiry: {datetime.fromtimestamp(expiration_time)} (rank {PUT_SPREAD_EXPIRY_RANK})")
+
+        _, puts_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
+        if not puts_dict:
+            logger.warning("puts_dict is empty, skipping iteration")
+            await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
+            continue
+
+        # ── Select legs by delta ranges (use abs delta for puts) ────────────────
+        sell_candidates = {
+            d: v for d, v in puts_dict.items()
+            if PUT_SPREAD_SELL_DELTA_MIN <= abs(d) <= PUT_SPREAD_SELL_DELTA_MAX
+        }
+        buy_candidates = {
+            d: v for d, v in puts_dict.items()
+            if PUT_SPREAD_BUY_DELTA_MIN <= abs(d) <= PUT_SPREAD_BUY_DELTA_MAX
+        }
+
+        if not sell_candidates or not buy_candidates:
+            logger.info(
+                f"PUT_SPREAD | Not enough eligible puts — "
+                f"sell candidates: {len(sell_candidates)}, buy candidates: {len(buy_candidates)}"
+            )
+            await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
+            continue
+
+        # Best pair: maximise (sell_iv - buy_iv) subject to sell_strike > buy_strike
+        # and sell_iv edge over GARCH
+        best = None  # (iv_edge, sell_delta, buy_delta)
+        for s_delta, s_data in sell_candidates.items():
+            for b_delta, b_data in buy_candidates.items():
+                if s_data['strike'] <= b_data['strike']:
+                    continue  # short leg must be higher strike
+                iv_edge = s_data['iv'] - garch_vol
+                spread_width = s_data['iv'] - b_data['iv']
+                score = iv_edge + spread_width  # maximise both
+                if best is None or score > best[0]:
+                    best = (score, iv_edge, s_delta, b_delta, s_data, b_data)
+
+        if best is None:
+            logger.info("PUT_SPREAD | No valid put spread pair found")
+            await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
+            continue
+
+        _, iv_edge, sell_delta, buy_delta, sell_data, buy_data = best
+        sell_symbol = sell_data['option_name']
+        buy_symbol  = buy_data['option_name']
+        sell_iv     = sell_data['iv']
+        buy_iv      = buy_data['iv']
+        sell_strike = sell_data['strike']
+        buy_strike  = buy_data['strike']
+
+        logger.info(
+            f"PUT_SPREAD | Best spread → "
+            f"SELL {sell_symbol} strike={sell_strike} Δ={sell_delta:.2f} IV={sell_iv:.2f}% | "
+            f"BUY  {buy_symbol}  strike={buy_strike}  Δ={buy_delta:.2f}  IV={buy_iv:.2f}% | "
+            f"IV edge vs GARCH={iv_edge:.2f}pp (threshold={PUT_SPREAD_MIN_IV_EDGE}pp)"
+        )
+
+        # ── Entry guard ─────────────────────────────────────────────────────────
+        open_puts = utils.put_options_count()
+        iv_edge_condition = iv_edge >= PUT_SPREAD_MIN_IV_EDGE
+        position_room     = open_puts < PUT_SPREAD_MAX_POSITIONS * 2  # 2 legs per spread
+        order_allowed     = iv_edge_condition and position_room
+
+        if not order_allowed:
+            logger.info(
+                f"PUT_SPREAD | Entry blocked — iv_edge_ok={iv_edge_condition} "
+                f"({iv_edge:.2f}pp >= {PUT_SPREAD_MIN_IV_EDGE}pp), "
+                f"position_room={position_room} (open puts={open_puts} < {PUT_SPREAD_MAX_POSITIONS * 2})"
+            )
+            await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
+            continue
+
+        # Validate live quotes for both legs
+        sell_info = mt5_conn.get_symbol_info(sell_symbol)
+        buy_info  = mt5_conn.get_symbol_info(buy_symbol)
+        if (
+            sell_info is None or buy_info is None or
+            sell_info.ask <= 0 or buy_info.ask <= 0
+        ):
+            logger.warning("PUT_SPREAD | One or both legs have no valid ask price; skipping")
+            await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
+            continue
+
+        spread_amount = 100.0
+        logger.info(
+            f"PUT_SPREAD | Placing spread: "
+            f"SELL {sell_symbol} @ {sell_info.bid:.4f} | BUY {buy_symbol} @ {buy_info.ask:.4f} "
+            f"volume={spread_amount}"
+        )
+        mt5_conn.place_order(
+            sell_symbol,
+            MT5Connector.ORDER_TYPE_SELL,
+            spread_amount,
+            sell_info.bid,
+            10,
+            f"PS-sell d={sell_delta:.2f} iv={sell_iv:.1f}",
+        )
+        mt5_conn.place_order(
+            buy_symbol,
+            MT5Connector.ORDER_TYPE_BUY,
+            spread_amount,
+            buy_info.ask,
+            10,
+            f"PS-buy  d={buy_delta:.2f} iv={buy_iv:.1f}",
+        )
+
+        await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
+
 STRATEGY_MAP = {
     VOLATILITY_SKEW: strategy_volatility_skew,
-    STRADDLE: strategy_straddle,
-}
+    STRADDLE: strategy_straddle,    PUT_SPREAD: strategy_put_spread,}
 
 
 async def main():

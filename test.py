@@ -361,4 +361,28 @@ async def compare_garch_iv_with_puts():
        time.sleep(15)
 
 
-asyncio.run(compare_garch_iv_with_puts())
+async def unselect_asset(symbol: str):
+    mt5_conn = MT5Connector()
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        return
+    count = mt5_conn.unselect_options_by_underlying(symbol)
+    if count > 0:
+        print(f"Successfully unselected {count} option symbols for {symbol} from Market Watch")
+    else:
+        print(f"No selected option symbols found for {symbol} in Market Watch")
+
+
+async def select_options_near_spot(symbol: str, expiry_rank: int = 1):
+    mt5_conn = MT5Connector()
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        return
+    count = mt5_conn.select_options_near_spot(symbol, expiry_rank)
+    if count > 0:
+        print(f"Selected {count} option symbols for {symbol} (expiry rank {expiry_rank}) in Market Watch")
+    else:
+        print(f"No new option symbols to select for {symbol} (expiry rank {expiry_rank})")
+
+
+asyncio.run(select_options_near_spot("PETR4", expiry_rank=3))

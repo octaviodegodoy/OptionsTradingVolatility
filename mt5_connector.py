@@ -362,7 +362,125 @@ class MT5Connector:
     
     def symbol_select(self,symbol,enable):
         return mt5.symbol_select(symbol,enable)
-    
+
+    def unselect_options_by_underlying(self, underlying: str) -> int:
+        """Remove all option symbols for a given underlying from the Market Watch.
+
+        Fetches every symbol matching the underlying prefix (e.g. 'PETR' for 'PETR4')
+        excluding the underlying itself, filters to options only (option_strike > 0),
+        and calls symbol_select(name, False) on those currently selected.
+
+        Returns the number of symbols successfully unselected.
+        """
+        prefix = underlying[:4]
+        group = f"*{prefix}*,!{underlying}*"
+        options_symbols = mt5.symbols_get(group) or []
+        count = 0
+        skipped = 0
+        for s in options_symbols:
+            if s.option_strike <= 0:
+                continue
+            if not s.select:
+                skipped += 1
+                continue
+            if mt5.symbol_select(s.name, False):
+                count += 1
+            else:
+                self.logger.warning(f"Failed to unselect {s.name}")
+        self.logger.info(
+            f"Unselected {count} option symbols for {underlying} "
+            f"({skipped} already unselected, {len(options_symbols)} total fetched)."
+        )
+        return count
+
+    def select_options_near_spot(self, underlying: str, expiry_rank: int = 1, strike_pct: float = 0.10) -> int:
+        """Select option symbols with strikes within strike_pct of the spot price
+        for the chosen expiry date of the given underlying.
+
+        Parameters
+        ----------
+        underlying  : underlying symbol, e.g. 'PETR4'
+        expiry_rank : 1 = next expiry, 2 = second next, 3 = third next
+        strike_pct  : max strike distance from spot as a fraction (default 0.10 = 10%)
+
+        Returns the number of symbols newly selected in Market Watch.
+        """
+        # Ensure the underlying is in Market Watch so we can get a live price
+        mt5.symbol_select(underlying, True)
+        symbol_info = mt5.symbol_info(underlying)
+        if symbol_info is None or (symbol_info.bid == 0.0 and symbol_info.ask == 0.0):
+            self.logger.error(f"Cannot get a valid spot price for {underlying}")
+            return 0
+        spot = (symbol_info.bid + symbol_info.ask) / 2
+        if spot == 0:
+            self.logger.error(f"Spot price for {underlying} is 0, aborting")
+            return 0
+
+        prefix = underlying[:4]
+        group = f"*{prefix}*,!{underlying}*"
+        options_symbols = mt5.symbols_get(group) or []
+        now_ts = int(time.time())
+
+        expiration_times = sorted({
+            s.expiration_time
+            for s in options_symbols
+            if s.option_strike > 0 and s.expiration_time > now_ts
+        })
+
+        if not expiration_times:
+            self.logger.warning(f"No future expiry times found for {underlying}")
+            return 0
+
+        idx = min(expiry_rank - 1, len(expiration_times) - 1)
+        chosen_expiry = expiration_times[idx]
+        lower = spot * (1 - strike_pct)
+        upper = spot * (1 + strike_pct)
+        self.logger.info(
+            f"Selecting {underlying} options | expiry rank {expiry_rank}: "
+            f"{datetime.fromtimestamp(chosen_expiry)} | spot={spot:.2f} | "
+            f"strike range [{lower:.2f}, {upper:.2f}]"
+        )
+
+        count = 0
+        already = 0
+        for s in options_symbols:
+            if s.expiration_time != chosen_expiry or s.option_strike <= 0:
+                continue
+            if not (lower <= s.option_strike <= upper):
+                continue
+            if s.select:
+                already += 1
+                continue
+            if mt5.symbol_select(s.name, True):
+                count += 1
+            else:
+                self.logger.warning(f"Failed to select {s.name}")
+        self.logger.info(
+            f"Selected {count} new option symbols for {underlying} "
+            f"({already} already selected)."
+        )
+        return count
+
+    def unselect_bova_options(self, symbol: str = "BOVA11") -> int:
+        """Remove all BOVA option symbols from the Market Watch.
+
+        Fetches every symbol matching '*BOVA*' except the underlying (BOVA11*)
+        and calls symbol_select(name, False) on each one.
+
+        Returns the number of symbols successfully unselected.
+        """
+        symbol_prefix = symbol[:4]  # "BOVA"
+        group = f"*{symbol_prefix}*,!{symbol}*"
+        options_symbols = mt5.symbols_get(group) or []
+        count = 0
+        for s in options_symbols:
+            if mt5.symbol_select(s.name, False):
+                count += 1
+            else:
+                self.logger.warning(f"Failed to unselect {s.name}")
+        self.logger.info(f"Unselected {count}/{len(options_symbols)} BOVA option symbols from Market Watch.")
+        return count
+
     def get_call_option_name_list(self,group_name):
         server_info = mt5.account_info().server
         print(f"Connected to MT5 server: {server_info}")  
@@ -382,7 +500,7 @@ class MT5Connector:
         print(f"Sorted call options names: {sorted_options_call_names}")
         return list(sorted_options_call_names.values())
     
-    def get_option_names_by_expiration_time(self,symbol):
+    def get_option_names_by_expiration_time(self, symbol, expiry_rank_override: int = None):
         from constants import MIN_BIZ_DAYS_TO_EXPIRY, BRAZILIAN_HOLIDAYS
         
         # Build the first valid Friday anchor after the minimum biz-day buffer,
@@ -422,12 +540,13 @@ class MT5Connector:
             self.logger.warning("No expiration times found after target date")
             return chain_expiration
 
-        requested_index = max(TARGET_OPTION_EXPIRY_RANK - 1, 0)
+        effective_rank = expiry_rank_override if expiry_rank_override is not None else TARGET_OPTION_EXPIRY_RANK
+        requested_index = max(effective_rank - 1, 0)
         chosen_index = min(requested_index, len(sorted_expiration_times) - 1)
 
         if chosen_index < requested_index:
             self.logger.warning(
-                f"Requested expiry #{TARGET_OPTION_EXPIRY_RANK}, but only {len(sorted_expiration_times)} future expiries were found. Falling back to the last available expiry."
+                f"Requested expiry #{effective_rank}, but only {len(sorted_expiration_times)} future expiries were found. Falling back to the last available expiry."
             )
 
         chosen_expiry = sorted_expiration_times[chosen_index]
