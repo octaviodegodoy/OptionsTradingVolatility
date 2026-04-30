@@ -31,15 +31,16 @@ PUT_SPREAD = "PUT_SPREAD"
 
 ACTIVE_STRATEGY = PUT_SPREAD
 
-# ── Put Spread strategy parameters ───────────────────────────
-PUT_SPREAD_EXPIRY_RANK = 1          # 1=next expiry, 2=second next, 3=third next
-PUT_SPREAD_SELL_DELTA_MIN = 0.25    # abs(delta) floor for the short put leg
-PUT_SPREAD_SELL_DELTA_MAX = 0.45    # abs(delta) ceiling for the short put leg
-PUT_SPREAD_BUY_DELTA_MIN  = 0.10    # abs(delta) floor for the long put leg
-PUT_SPREAD_BUY_DELTA_MAX  = 0.24    # abs(delta) ceiling for the long put leg
-PUT_SPREAD_MIN_IV_EDGE    = 2.0     # min (sell_iv - garch_vol) in pp to enter
-PUT_SPREAD_MAX_POSITIONS  = 2       # max open put spread sets allowed
-PUT_SPREAD_SLEEP_SECONDS  = 25
+# ── Put Spread strategy parameters (bearish / debit spread) ──
+PUT_SPREAD_EXPIRY_RANK     = 1      # 1=next expiry, 2=second next, 3=third next
+PUT_SPREAD_LONG_DELTA_MIN  = 0.25   # abs(delta) floor for the long put leg  (higher strike, closer ATM)
+PUT_SPREAD_LONG_DELTA_MAX  = 0.45   # abs(delta) ceiling for the long put leg
+PUT_SPREAD_SHORT_DELTA_MIN = 0.10   # abs(delta) floor for the short put leg (lower strike, further OTM)
+PUT_SPREAD_SHORT_DELTA_MAX = 0.24   # abs(delta) ceiling for the short put leg
+PUT_SPREAD_MIN_IV_EDGE     = 2.0    # min (garch_vol - long_iv) in pp to enter (long IV cheap vs GARCH)
+PUT_SPREAD_MAX_POSITIONS   = 2      # max open put spread sets allowed
+PUT_SPREAD_SLEEP_SECONDS   = 25
+PUT_SPREAD_CALL_WALL_OFFSET = 0.05  # target long-leg strike = call_wall * (1 + this)
 
 BRAZILIAN_HOLIDAYS = [
     "2026-02-16",

@@ -6,8 +6,8 @@ from constants import (
     IV_DIFF_THRESHOLD_CALLS, MIN_PUT_IV, STEEP_THRESHOLD, ANNUAL_TRADING_DAYS,
     ACTIVE_STRATEGY, VOLATILITY_SKEW, STRADDLE, PUT_SPREAD,
     STRADDLE_MAX_DELTA_IMBALANCE, STRADDLE_SLEEP_SECONDS,
-    PUT_SPREAD_EXPIRY_RANK, PUT_SPREAD_SELL_DELTA_MIN, PUT_SPREAD_SELL_DELTA_MAX,
-    PUT_SPREAD_BUY_DELTA_MIN, PUT_SPREAD_BUY_DELTA_MAX,
+    PUT_SPREAD_EXPIRY_RANK, PUT_SPREAD_LONG_DELTA_MIN, PUT_SPREAD_LONG_DELTA_MAX,
+    PUT_SPREAD_SHORT_DELTA_MIN, PUT_SPREAD_SHORT_DELTA_MAX,
     PUT_SPREAD_MIN_IV_EDGE, PUT_SPREAD_MAX_POSITIONS, PUT_SPREAD_SLEEP_SECONDS,
 )
 from mt5_connector import MT5Connector
@@ -393,11 +393,11 @@ async def strategy_straddle(mt5_conn, quant_calc, utils, logger):
 
 async def strategy_put_spread(mt5_conn, quant_calc, utils, logger):
     """
-    PUT_SPREAD strategy — bull put spread (credit spread):
-    - Sell a moderately OTM put (short leg, higher strike)
-    - Buy a further OTM put (long leg, lower strike, protection)
-    - Enter when short-put IV is sufficiently above GARCH volatility
-      (expensive premium = edge for the seller)
+    PUT_SPREAD strategy — bearish put spread (debit spread):
+    - Buy a moderately OTM put (long leg, higher strike, closer to ATM)
+    - Sell a further OTM put (short leg, lower strike, for premium offset)
+    - Enter when long-put IV is sufficiently below GARCH volatility
+      (cheap premium relative to expected realised vol = edge for the buyer)
     - Expiry is selected by PUT_SPREAD_EXPIRY_RANK (1=next, 2=second, 3=third)
     """
     asset = ASSET_SYMBOL[0]
@@ -454,53 +454,54 @@ async def strategy_put_spread(mt5_conn, quant_calc, utils, logger):
             continue
 
         # ── Select legs by delta ranges (use abs delta for puts) ────────────────
-        sell_candidates = {
+        long_candidates = {
             d: v for d, v in puts_dict.items()
-            if PUT_SPREAD_SELL_DELTA_MIN <= abs(d) <= PUT_SPREAD_SELL_DELTA_MAX
+            if PUT_SPREAD_LONG_DELTA_MIN <= abs(d) <= PUT_SPREAD_LONG_DELTA_MAX
         }
-        buy_candidates = {
+        short_candidates = {
             d: v for d, v in puts_dict.items()
-            if PUT_SPREAD_BUY_DELTA_MIN <= abs(d) <= PUT_SPREAD_BUY_DELTA_MAX
+            if PUT_SPREAD_SHORT_DELTA_MIN <= abs(d) <= PUT_SPREAD_SHORT_DELTA_MAX
         }
 
-        if not sell_candidates or not buy_candidates:
+        if not long_candidates or not short_candidates:
             logger.info(
                 f"PUT_SPREAD | Not enough eligible puts — "
-                f"sell candidates: {len(sell_candidates)}, buy candidates: {len(buy_candidates)}"
+                f"long candidates: {len(long_candidates)}, short candidates: {len(short_candidates)}"
             )
             await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
             continue
 
-        # Best pair: maximise (sell_iv - buy_iv) subject to sell_strike > buy_strike
-        # and sell_iv edge over GARCH
-        best = None  # (iv_edge, sell_delta, buy_delta)
-        for s_delta, s_data in sell_candidates.items():
-            for b_delta, b_data in buy_candidates.items():
-                if s_data['strike'] <= b_data['strike']:
-                    continue  # short leg must be higher strike
-                iv_edge = s_data['iv'] - garch_vol
-                spread_width = s_data['iv'] - b_data['iv']
-                score = iv_edge + spread_width  # maximise both
+        # Best pair: long leg must have higher strike than short leg.
+        # Maximise (garch_vol - long_iv) i.e. cheapness of the long leg,
+        # plus (short_iv - long_iv) i.e. skew premium collected on short leg.
+        best = None  # (score, iv_edge, long_delta, short_delta, long_data, short_data)
+        for l_delta, l_data in long_candidates.items():
+            for s_delta, s_data in short_candidates.items():
+                if l_data['strike'] <= s_data['strike']:
+                    continue  # long leg must be the higher strike
+                iv_edge = garch_vol - l_data['iv']          # positive = long IV cheap vs GARCH
+                spread_skew = s_data['iv'] - l_data['iv']   # skew benefit on short leg
+                score = iv_edge + spread_skew
                 if best is None or score > best[0]:
-                    best = (score, iv_edge, s_delta, b_delta, s_data, b_data)
+                    best = (score, iv_edge, l_delta, s_delta, l_data, s_data)
 
         if best is None:
-            logger.info("PUT_SPREAD | No valid put spread pair found")
+            logger.info("PUT_SPREAD | No valid bearish put spread pair found")
             await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
             continue
 
-        _, iv_edge, sell_delta, buy_delta, sell_data, buy_data = best
-        sell_symbol = sell_data['option_name']
-        buy_symbol  = buy_data['option_name']
-        sell_iv     = sell_data['iv']
-        buy_iv      = buy_data['iv']
-        sell_strike = sell_data['strike']
-        buy_strike  = buy_data['strike']
+        _, iv_edge, long_delta, short_delta, long_data, short_data = best
+        long_symbol  = long_data['option_name']
+        short_symbol = short_data['option_name']
+        long_iv      = long_data['iv']
+        short_iv     = short_data['iv']
+        long_strike  = long_data['strike']
+        short_strike = short_data['strike']
 
         logger.info(
             f"PUT_SPREAD | Best spread → "
-            f"SELL {sell_symbol} strike={sell_strike} Δ={sell_delta:.2f} IV={sell_iv:.2f}% | "
-            f"BUY  {buy_symbol}  strike={buy_strike}  Δ={buy_delta:.2f}  IV={buy_iv:.2f}% | "
+            f"BUY  {long_symbol}  strike={long_strike}  Δ={long_delta:.2f}  IV={long_iv:.2f}% | "
+            f"SELL {short_symbol} strike={short_strike} Δ={short_delta:.2f} IV={short_iv:.2f}% | "
             f"IV edge vs GARCH={iv_edge:.2f}pp (threshold={PUT_SPREAD_MIN_IV_EDGE}pp)"
         )
 
@@ -520,37 +521,38 @@ async def strategy_put_spread(mt5_conn, quant_calc, utils, logger):
             continue
 
         # Validate live quotes for both legs
-        sell_info = mt5_conn.get_symbol_info(sell_symbol)
-        buy_info  = mt5_conn.get_symbol_info(buy_symbol)
+        long_info  = mt5_conn.get_symbol_info(long_symbol)
+        short_info = mt5_conn.get_symbol_info(short_symbol)
         if (
-            sell_info is None or buy_info is None or
-            sell_info.ask <= 0 or buy_info.ask <= 0
+            long_info is None or short_info is None or
+            long_info.ask <= 0 or short_info.bid <= 0
         ):
-            logger.warning("PUT_SPREAD | One or both legs have no valid ask price; skipping")
+            logger.warning("PUT_SPREAD | One or both legs have no valid quote; skipping")
             await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
             continue
 
         spread_amount = 100.0
         logger.info(
             f"PUT_SPREAD | Placing spread: "
-            f"SELL {sell_symbol} @ {sell_info.bid:.4f} | BUY {buy_symbol} @ {buy_info.ask:.4f} "
+            f"BUY  {long_symbol}  @ {long_info.ask:.4f} | "
+            f"SELL {short_symbol} @ {short_info.bid:.4f} "
             f"volume={spread_amount}"
         )
         mt5_conn.place_order(
-            sell_symbol,
-            MT5Connector.ORDER_TYPE_SELL,
-            spread_amount,
-            sell_info.bid,
-            10,
-            f"PS-sell d={sell_delta:.2f} iv={sell_iv:.1f}",
-        )
-        mt5_conn.place_order(
-            buy_symbol,
+            long_symbol,
             MT5Connector.ORDER_TYPE_BUY,
             spread_amount,
-            buy_info.ask,
+            long_info.ask,
             10,
-            f"PS-buy  d={buy_delta:.2f} iv={buy_iv:.1f}",
+            f"BP-long  d={long_delta:.2f} iv={long_iv:.1f}",
+        )
+        mt5_conn.place_order(
+            short_symbol,
+            MT5Connector.ORDER_TYPE_SELL,
+            spread_amount,
+            short_info.bid,
+            10,
+            f"BP-short d={short_delta:.2f} iv={short_iv:.1f}",
         )
 
         await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)

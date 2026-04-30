@@ -1,13 +1,22 @@
 import numpy as np
 from scipy.stats import norm
 from functions.black_scholes import BlackScholesCalculator
-from constants import ASSET_SYMBOL, CALL_OPTION, GARCH_SAMPLE_SIZE, PERIODS
+from constants import (
+    ASSET_SYMBOL, CALL_OPTION, GARCH_SAMPLE_SIZE, PERIODS,
+    PUT_SPREAD_EXPIRY_RANK,
+    PUT_SPREAD_LONG_DELTA_MIN, PUT_SPREAD_LONG_DELTA_MAX,
+    PUT_SPREAD_SHORT_DELTA_MIN, PUT_SPREAD_SHORT_DELTA_MAX,
+    PUT_SPREAD_MIN_IV_EDGE, PUT_SPREAD_CALL_WALL_OFFSET,
+)
+from functions.gamma_exposure_calc import bs_gamma, implied_vol_newton, infer_right_from_symbol_name
 from mt5_connector import MT5Connector
 import asyncio
 import time
+from datetime import datetime, timezone
 from scipy.optimize import newton, brentq
 from functions.quant_functions import QuantCalculation
 from utils import Utils
+import math
 
 class BlackScholesIV:
     """
@@ -385,4 +394,302 @@ async def select_options_near_spot(symbol: str, expiry_rank: int = 1):
         print(f"No new option symbols to select for {symbol} (expiry rank {expiry_rank})")
 
 
-asyncio.run(select_options_near_spot("PETR4", expiry_rank=3))
+def compute_call_wall(
+    mt5_raw,
+    underlying_basis: str,
+    spot: float,
+    risk_free_rate: float = 0.12,
+    div_yield: float = 0.00,
+) -> dict:
+    """
+    Compute call-only GEX by strike and return the call wall.
+
+    The call wall is the strike with the highest aggregate call dollar-gamma
+    (positive GEX). When OI (session_interest) is zero for all series the
+    function falls back to session_volume as a proxy and warns.
+
+    Returns a dict:
+      {
+        'call_wall': float,
+        'gex_by_strike': dict[float, float],  # strike -> call GEX
+        'oi_proxy': str,                       # 'session_interest' or 'session_volume'
+        'total_call_gex': float,
+      }
+    Returns None when no options are found.
+    """
+    glob = underlying_basis.rstrip("0123456789") + "*"
+    syms = mt5_raw.symbols_get(glob) or []
+    now_epoch = int(datetime.now(timezone.utc).timestamp())
+
+    gex_by_strike: dict = {}
+    any_oi = False
+    rows = []
+
+    for s in syms:
+        info = mt5_raw.symbol_info(s.name)
+        if not info or getattr(info, "basis", "") != underlying_basis:
+            continue
+        if info.option_strike <= 0 or info.expiration_time <= 0:
+            continue
+        if info.expiration_time <= now_epoch:
+            continue
+
+        # Only calls contribute to the call wall
+        right = None
+        opt_right = getattr(info, "option_right", 0)
+        if opt_right == 1:
+            right = "C"
+        else:
+            right = infer_right_from_symbol_name(info.name, underlying_basis)
+        if right != "C":
+            continue
+
+        mid = 0.0
+        if info.bid > 0 and info.ask > 0:
+            mid = (info.bid + info.ask) / 2.0
+        elif getattr(info, "price_theoretical", 0.0):
+            mid = float(info.price_theoretical)
+        if mid <= 0:
+            continue
+
+        T_years = max(0.0, info.expiration_time - now_epoch) / (365.0 * 24 * 3600)
+        if T_years <= 0:
+            continue
+
+        oi = float(getattr(info, "session_interest", 0.0) or 0.0)
+        vol = float(getattr(info, "session_volume", 0.0) or 0.0)
+        if oi > 0:
+            any_oi = True
+
+        rows.append({
+            "strike": float(info.option_strike),
+            "T": T_years,
+            "mid": mid,
+            "oi": oi,
+            "vol": vol,
+            "mult": float(info.trade_contract_size or 1.0),
+        })
+
+    if not rows:
+        return None
+
+    oi_proxy = "session_interest" if any_oi else "session_volume"
+    if not any_oi:
+        print("  [GEX] WARNING: session_interest=0 for all calls; falling back to session_volume as OI proxy.")
+
+    for row in rows:
+        sigma = implied_vol_newton(
+            spot, row["strike"], row["T"],
+            risk_free_rate, div_yield, "C", row["mid"]
+        )
+        if not sigma:
+            continue
+        g = bs_gamma(spot, row["strike"], row["T"], risk_free_rate, div_yield, sigma)
+        oi_val = row["oi"] if any_oi else row["vol"]
+        dollar_gamma = (spot ** 2) * g * row["mult"]
+        call_gex = dollar_gamma * oi_val
+        gex_by_strike[row["strike"]] = gex_by_strike.get(row["strike"], 0.0) + call_gex
+
+    if not gex_by_strike:
+        return None
+
+    call_wall = max(gex_by_strike, key=lambda k: gex_by_strike[k])
+    return {
+        "call_wall": call_wall,
+        "gex_by_strike": gex_by_strike,
+        "oi_proxy": oi_proxy,
+        "total_call_gex": sum(gex_by_strike.values()),
+    }
+
+
+async def scan_put_spread_opportunities(asset: str = None, expiry_rank: int = PUT_SPREAD_EXPIRY_RANK):
+    """
+    Scan and rank all bearish put spread candidates for the given asset.
+    Prints the full put surface and a sorted table of spread pairs.
+    No orders are placed.
+    """
+    mt5_conn = MT5Connector()
+    quant_calc = QuantCalculation()
+    utils = Utils()
+
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        return
+
+    if asset is None:
+        asset = ASSET_SYMBOL[0]
+
+    selected = mt5_conn.symbol_select(asset, True)
+    if not selected:
+        print(f"Failed to select {asset}")
+        return
+
+    for _ in range(10):
+        tick = mt5_conn.get_mt5_connector().symbol_info_tick(asset)
+        if tick is not None and tick.bid > 0 and tick.ask > 0:
+            break
+        print(f"Waiting for {asset} tick data...")
+        await asyncio.sleep(1)
+    else:
+        print(f"{asset} has no tick data after 10 s — check Market Watch")
+        return
+
+    symbol_info = mt5_conn.get_symbol_info(asset)
+    atm_price = (symbol_info.bid + symbol_info.ask) / 2
+
+    print(f"\n{'='*72}")
+    print(f"PUT SPREAD SCANNER  |  {asset}  |  spot={atm_price:.2f}  |  expiry rank={expiry_rank}")
+    print(f"{'='*72}")
+
+    spot_prices_data = mt5_conn.get_data(
+        asset, mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0
+    )["close"].values
+    garch_vol = quant_calc.agarch_estimation(spot_prices_data) * 100
+    print(f"GARCH vol : {garch_vol:.2f}%")
+
+    # ── GEX: locate call wall ────────────────────────────────────────────────
+    mt5_raw = mt5_conn.get_mt5_connector()
+    gex_result = compute_call_wall(mt5_raw, asset, atm_price)
+    if gex_result:
+        call_wall = gex_result["call_wall"]
+        target_long_strike = call_wall * (1.0 + PUT_SPREAD_CALL_WALL_OFFSET)
+        print(f"Call wall : {call_wall:.2f}  (OI proxy: {gex_result['oi_proxy']},  "
+              f"total call GEX={gex_result['total_call_gex']:,.0f})")
+        print(f"Target long-leg strike (call_wall + {PUT_SPREAD_CALL_WALL_OFFSET*100:.0f}%) : {target_long_strike:.2f}")
+        top_gex = sorted(gex_result["gex_by_strike"].items(), key=lambda x: x[1], reverse=True)[:5]
+        print(f"Top 5 call GEX strikes: {[(f'{k:.2f}', f'{v:,.0f}') for k, v in top_gex]}")
+    else:
+        call_wall = None
+        target_long_strike = None
+        print("Call wall : unavailable (no call options with valid mid price found)")
+
+    chain_options = mt5_conn.get_option_names_by_expiration_time(
+        asset, expiry_rank_override=expiry_rank
+    )
+    if not chain_options:
+        print("No option chain returned for selected expiry rank")
+        return
+
+    expiration_time = next(iter(chain_options.keys()))
+    print(f"Expiry    : {datetime.fromtimestamp(expiration_time)}\n")
+
+    _, puts_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
+    if not puts_dict:
+        print("No puts returned from chain")
+        return
+
+    # ── Full put surface ─────────────────────────────────────────────────────
+    print(f"{'Delta':>7} {'Strike':>8} {'IV%':>7}  {'Option':<22}  Role")
+    print("-" * 60)
+    for d in sorted(puts_dict, key=lambda x: abs(x), reverse=True):
+        v = puts_dict[d]
+        if PUT_SPREAD_LONG_DELTA_MIN <= abs(d) <= PUT_SPREAD_LONG_DELTA_MAX:
+            role = "LONG  (Δ {:.2f}–{:.2f})".format(PUT_SPREAD_LONG_DELTA_MIN, PUT_SPREAD_LONG_DELTA_MAX)
+        elif PUT_SPREAD_SHORT_DELTA_MIN <= abs(d) <= PUT_SPREAD_SHORT_DELTA_MAX:
+            role = "SHORT (Δ {:.2f}–{:.2f})".format(PUT_SPREAD_SHORT_DELTA_MIN, PUT_SPREAD_SHORT_DELTA_MAX)
+        else:
+            role = ""
+        print(f"{d:>7.2f} {v['strike']:>8.2f} {v['iv']:>7.2f}  {v['option_name']:<22}  {role}")
+
+    # ── Build all valid pairs ─────────────────────────────────────────────────
+    # When a call wall is available, filter long-leg candidates to those whose
+    # strike is closest to call_wall * (1 + PUT_SPREAD_CALL_WALL_OFFSET).
+    # We keep the single nearest strike above and below the target.
+    long_candidates_all = {
+        d: v for d, v in puts_dict.items()
+        if PUT_SPREAD_LONG_DELTA_MIN <= abs(d) <= PUT_SPREAD_LONG_DELTA_MAX
+    }
+    if target_long_strike is not None and long_candidates_all:
+        all_long_strikes = sorted({v['strike'] for v in long_candidates_all.values()})
+        # Find nearest strike above and below target
+        below = [s for s in all_long_strikes if s <= target_long_strike]
+        above = [s for s in all_long_strikes if s > target_long_strike]
+        nearest_strikes = set()
+        if below:
+            nearest_strikes.add(max(below))
+        if above:
+            nearest_strikes.add(min(above))
+        long_candidates = {
+            d: v for d, v in long_candidates_all.items()
+            if v['strike'] in nearest_strikes
+        }
+        print(f"\nCall-wall filter: target long strike={target_long_strike:.2f}, "
+              f"pinned to nearest available strikes={sorted(nearest_strikes)}")
+        if not long_candidates:
+            print("  No long candidates survive call-wall filter — falling back to full delta range.")
+            long_candidates = long_candidates_all
+    else:
+        long_candidates = long_candidates_all
+
+    short_candidates = {
+        d: v for d, v in puts_dict.items()
+        if PUT_SPREAD_SHORT_DELTA_MIN <= abs(d) <= PUT_SPREAD_SHORT_DELTA_MAX
+    }
+
+    candidates = []
+    for l_delta, l_data in long_candidates.items():
+        for s_delta, s_data in short_candidates.items():
+            if l_data['strike'] <= s_data['strike']:
+                continue  # long leg must be the higher strike
+            iv_edge = garch_vol - l_data['iv']        # positive = long IV cheap vs GARCH
+            spread_skew = s_data['iv'] - l_data['iv'] # skew premium collected on short leg
+            # Proximity bonus: reward long strikes closer to the call-wall target
+            proximity_penalty = 0.0
+            if target_long_strike is not None:
+                proximity_penalty = abs(l_data['strike'] - target_long_strike) / max(target_long_strike, 1.0) * 10
+            score = iv_edge + spread_skew - proximity_penalty
+            candidates.append({
+                'score': score,
+                'iv_edge': iv_edge,
+                'spread_skew': spread_skew,
+                'proximity_penalty': proximity_penalty,
+                'long_delta': l_delta,
+                'short_delta': s_delta,
+                'long_symbol': l_data['option_name'],
+                'short_symbol': s_data['option_name'],
+                'long_iv': l_data['iv'],
+                'short_iv': s_data['iv'],
+                'long_strike': l_data['strike'],
+                'short_strike': s_data['strike'],
+            })
+
+    if not candidates:
+        print("\nNo valid spread pairs found within configured delta ranges.")
+        return
+
+    candidates.sort(key=lambda x: x['score'], reverse=True)
+
+    # ── Ranked table ─────────────────────────────────────────────────────────
+    cw_label = f"call_wall={call_wall:.2f}" if call_wall else "call_wall=N/A"
+    print(f"\n{'='*80}")
+    print(f"RANKED SPREAD CANDIDATES  (min iv_edge >= {PUT_SPREAD_MIN_IV_EDGE}pp  |  GARCH={garch_vol:.2f}%  |  {cw_label})")
+    print(f"{'='*80}")
+    col = f"{'#':>3}  {'Score':>6}  {'Edge':>6}  {'Skew':>6}  {'Prox':>6}  {'LONG leg':<18}  {'SHORT leg':<18}  {'LStr':>6}  {'SStr':>6}  {'LIV%':>6}  {'SIV%':>6}  OK"
+    print(col)
+    print("-" * len(col))
+    for i, c in enumerate(candidates, 1):
+        ok = "YES" if c['iv_edge'] >= PUT_SPREAD_MIN_IV_EDGE else "no"
+        print(
+            f"{i:>3}  {c['score']:>6.2f}  {c['iv_edge']:>6.2f}  {c['spread_skew']:>6.2f}  {c['proximity_penalty']:>6.2f}  "
+            f"{c['long_symbol']:<18}  {c['short_symbol']:<18}  "
+            f"{c['long_strike']:>6.2f}  {c['short_strike']:>6.2f}  "
+            f"{c['long_iv']:>6.2f}  {c['short_iv']:>6.2f}  {ok}"
+        )
+
+    # ── Best eligible summary ─────────────────────────────────────────────────
+    eligible = [c for c in candidates if c['iv_edge'] >= PUT_SPREAD_MIN_IV_EDGE]
+    print(f"\n{'='*80}")
+    if eligible:
+        b = eligible[0]
+        print(f"BEST ELIGIBLE SPREAD:")
+        if call_wall:
+            print(f"  Call wall          : {call_wall:.2f}  →  target long strike : {target_long_strike:.2f}  (+{PUT_SPREAD_CALL_WALL_OFFSET*100:.0f}%)")
+        print(f"  BUY  {b['long_symbol']:<20}  strike={b['long_strike']:.2f}  Δ={b['long_delta']:.2f}  IV={b['long_iv']:.2f}%")
+        print(f"  SELL {b['short_symbol']:<20}  strike={b['short_strike']:.2f}  Δ={b['short_delta']:.2f}  IV={b['short_iv']:.2f}%")
+        print(f"  IV edge vs GARCH   : {b['iv_edge']:.2f}pp  |  spread skew : {b['spread_skew']:.2f}pp  |  score : {b['score']:.2f}")
+    else:
+        print(f"No spread meets the minimum IV edge threshold of {PUT_SPREAD_MIN_IV_EDGE}pp vs GARCH ({garch_vol:.2f}%)")
+    print(f"{'='*80}\n")
+
+
+asyncio.run(scan_put_spread_opportunities("PETR4", expiry_rank=2))
