@@ -7,6 +7,10 @@ from constants import (
     PUT_SPREAD_LONG_DELTA_MIN, PUT_SPREAD_LONG_DELTA_MAX,
     PUT_SPREAD_SHORT_DELTA_MIN, PUT_SPREAD_SHORT_DELTA_MAX,
     PUT_SPREAD_MIN_IV_EDGE, PUT_SPREAD_CALL_WALL_OFFSET,
+    SHORT_CALL_BUTTERFLY_EXPIRY_RANK,
+    SHORT_CALL_BUTTERFLY_MAX_BODY_DISTANCE_PCT,
+    SHORT_CALL_BUTTERFLY_MIN_IV_EDGE,
+    SHORT_CALL_BUTTERFLY_MIN_NET_CREDIT,
 )
 from functions.gamma_exposure_calc import bs_gamma, implied_vol_newton, infer_right_from_symbol_name
 from mt5_connector import MT5Connector
@@ -502,6 +506,103 @@ def compute_call_wall(
     }
 
 
+def build_short_call_butterfly_candidates(utils, calls_dict, spot_price, garch_vol):
+    call_by_strike = {}
+    for call_delta, call_data in calls_dict.items():
+        strike = call_data["strike"]
+        current = call_by_strike.get(strike)
+        if current is None or abs(call_delta - 0.50) < abs(current[0] - 0.50):
+            call_by_strike[strike] = (call_delta, call_data)
+
+    if len(call_by_strike) < 3:
+        return []
+
+    quote_by_strike = {}
+    for strike, (_, call_data) in call_by_strike.items():
+        option_info = utils.get_option_info_with_quote(call_data["option_name"])
+        if option_info is None or option_info.bid <= 0.0 or option_info.ask <= 0.0:
+            continue
+        quote_by_strike[strike] = option_info
+
+    strikes = sorted(quote_by_strike.keys())
+    strikes_set = set(strikes)
+    candidates = []
+
+    for middle_idx in range(1, len(strikes) - 1):
+        middle_strike = strikes[middle_idx]
+        body_distance_pct = abs(middle_strike - spot_price) / max(spot_price, 1.0)
+        if body_distance_pct > SHORT_CALL_BUTTERFLY_MAX_BODY_DISTANCE_PCT:
+            continue
+
+        for lower_strike in strikes[:middle_idx]:
+            wing_width = middle_strike - lower_strike
+            if wing_width <= 0:
+                continue
+
+            upper_strike = round(middle_strike + wing_width, 8)
+            if upper_strike not in strikes_set:
+                continue
+
+            lower_delta, lower_data = call_by_strike[lower_strike]
+            middle_delta, middle_data = call_by_strike[middle_strike]
+            upper_delta, upper_data = call_by_strike[upper_strike]
+            lower_quote = quote_by_strike[lower_strike]
+            middle_quote = quote_by_strike[middle_strike]
+            upper_quote = quote_by_strike[upper_strike]
+
+            net_credit = lower_quote.bid + upper_quote.bid - (2 * middle_quote.ask)
+            max_profit = net_credit
+            max_loss = wing_width - net_credit
+            reward_risk = max_profit / max_loss if max_profit > 0 and max_loss > 0 else -math.inf
+            body_iv_edge = garch_vol - middle_data["iv"]
+            wing_richness = ((lower_data["iv"] + upper_data["iv"]) / 2) - middle_data["iv"]
+            eligible = (
+                net_credit >= SHORT_CALL_BUTTERFLY_MIN_NET_CREDIT
+                and body_iv_edge >= SHORT_CALL_BUTTERFLY_MIN_IV_EDGE
+                and max_loss > 0
+            )
+
+            candidates.append({
+                "reward_risk": reward_risk,
+                "max_profit": max_profit,
+                "max_loss": max_loss,
+                "net_credit": net_credit,
+                "wing_width": wing_width,
+                "body_iv_edge": body_iv_edge,
+                "wing_richness": wing_richness,
+                "body_distance_pct": body_distance_pct,
+                "lower_symbol": lower_data["option_name"],
+                "middle_symbol": middle_data["option_name"],
+                "upper_symbol": upper_data["option_name"],
+                "lower_strike": lower_strike,
+                "middle_strike": middle_strike,
+                "upper_strike": upper_strike,
+                "lower_delta": lower_delta,
+                "middle_delta": middle_delta,
+                "upper_delta": upper_delta,
+                "lower_iv": lower_data["iv"],
+                "middle_iv": middle_data["iv"],
+                "upper_iv": upper_data["iv"],
+                "lower_bid": lower_quote.bid,
+                "middle_ask": middle_quote.ask,
+                "upper_bid": upper_quote.bid,
+                "eligible": eligible,
+            })
+
+    return sorted(
+        candidates,
+        key=lambda c: (
+            c["eligible"],
+            c["reward_risk"],
+            c["net_credit"],
+            c["body_iv_edge"],
+            c["wing_richness"],
+            -c["body_distance_pct"],
+        ),
+        reverse=True,
+    )
+
+
 async def scan_put_spread_opportunities(asset: str = None, expiry_rank: int = PUT_SPREAD_EXPIRY_RANK):
     """
     Scan and rank all bearish put spread candidates for the given asset.
@@ -692,4 +793,134 @@ async def scan_put_spread_opportunities(asset: str = None, expiry_rank: int = PU
     print(f"{'='*80}\n")
 
 
-asyncio.run(scan_put_spread_opportunities("PETR4", expiry_rank=2))
+async def scan_short_call_butterfly_opportunities(
+    asset: str = None,
+    expiry_rank: int = SHORT_CALL_BUTTERFLY_EXPIRY_RANK,
+):
+    """
+    Scan and rank all symmetric short call butterfly candidates for the given asset.
+    Prints the call surface and a sorted table using quoted max-profit / max-loss.
+    No orders are placed.
+    """
+    mt5_conn = MT5Connector()
+    quant_calc = QuantCalculation()
+    utils = Utils()
+
+    if not mt5_conn.initialize():
+        print("MT5 initialization failed")
+        return
+
+    if asset is None:
+        asset = ASSET_SYMBOL[0]
+
+    selected = mt5_conn.symbol_select(asset, True)
+    if not selected:
+        print(f"Failed to select {asset}")
+        return
+
+    for _ in range(10):
+        tick = mt5_conn.get_mt5_connector().symbol_info_tick(asset)
+        if tick is not None and tick.bid > 0 and tick.ask > 0:
+            break
+        print(f"Waiting for {asset} tick data...")
+        await asyncio.sleep(1)
+    else:
+        print(f"{asset} has no tick data after 10 s — check Market Watch")
+        return
+
+    symbol_info = mt5_conn.get_symbol_info(asset)
+    spot = (symbol_info.bid + symbol_info.ask) / 2
+
+    print(f"\n{'='*88}")
+    print(f"SHORT CALL BUTTERFLY SCANNER  |  {asset}  |  spot={spot:.2f}  |  expiry rank={expiry_rank}")
+    print(f"{'='*88}")
+
+    spot_prices_data = mt5_conn.get_data(
+        asset, mt5_conn.get_mt5_connector().TIMEFRAME_D1, GARCH_SAMPLE_SIZE, 0
+    )["close"].values
+    garch_vol = quant_calc.agarch_estimation(spot_prices_data) * 100
+    print(f"GARCH vol : {garch_vol:.2f}%")
+
+    chain_options = mt5_conn.get_option_names_by_expiration_time(
+        asset, expiry_rank_override=expiry_rank
+    )
+    if not chain_options:
+        print("No option chain returned for selected expiry rank")
+        return
+
+    expiration_time = next(iter(chain_options.keys()))
+    print(f"Expiry    : {datetime.fromtimestamp(expiration_time)}\n")
+
+    calls_dict, _ = utils.get_calls_and_puts_data(chain_options, symbol_info)
+    if not calls_dict:
+        print("No calls returned from chain")
+        return
+
+    print(f"{'Delta':>7} {'Strike':>8} {'IV%':>7}  {'Option':<22}")
+    print("-" * 52)
+    for d in sorted(calls_dict):
+        v = calls_dict[d]
+        print(f"{d:>7.2f} {v['strike']:>8.2f} {v['iv']:>7.2f}  {v['option_name']:<22}")
+
+    candidates = build_short_call_butterfly_candidates(utils, calls_dict, spot, garch_vol)
+    if not candidates:
+        print("\nNo symmetric short call butterfly candidates found with valid live quotes.")
+        return
+
+    print(f"\n{'='*136}")
+    print(
+        "RANKED SHORT CALL BUTTERFLY CANDIDATES  "
+        f"(min body_iv_edge >= {SHORT_CALL_BUTTERFLY_MIN_IV_EDGE:.2f}pp  |  "
+        f"min credit >= {SHORT_CALL_BUTTERFLY_MIN_NET_CREDIT:.4f}  |  "
+        f"max body distance <= {SHORT_CALL_BUTTERFLY_MAX_BODY_DISTANCE_PCT*100:.1f}%  |  "
+        f"GARCH={garch_vol:.2f}%)"
+    )
+    print(f"{'='*136}")
+    col = (
+        f"{'#':>3}  {'RR':>7}  {'Credit':>8}  {'MaxLoss':>8}  {'Wing':>6}  "
+        f"{'Edge':>6}  {'Rich':>6}  {'Dist%':>6}  {'LOW':<16}  {'BODY':<16}  {'UP':<16}  OK"
+    )
+    print(col)
+    print("-" * len(col))
+    for i, c in enumerate(candidates, 1):
+        rr_display = f"{c['reward_risk']:.2f}" if math.isfinite(c["reward_risk"]) else "N/A"
+        ok = "YES" if c["eligible"] else "no"
+        print(
+            f"{i:>3}  {rr_display:>7}  {c['net_credit']:>8.4f}  {c['max_loss']:>8.4f}  {c['wing_width']:>6.2f}  "
+            f"{c['body_iv_edge']:>6.2f}  {c['wing_richness']:>6.2f}  {c['body_distance_pct']*100:>6.2f}  "
+            f"{c['lower_symbol']:<16}  {c['middle_symbol']:<16}  {c['upper_symbol']:<16}  {ok}"
+        )
+
+    eligible = [c for c in candidates if c["eligible"]]
+    best = eligible[0] if eligible else candidates[0]
+    print(f"\n{'='*88}")
+    if eligible:
+        print("BEST ELIGIBLE SHORT CALL BUTTERFLY:")
+    else:
+        print("BEST AVAILABLE SHORT CALL BUTTERFLY (none met all thresholds):")
+    print(
+        f"  SELL {best['lower_symbol']:<20} strike={best['lower_strike']:.2f}  Δ={best['lower_delta']:.2f}  "
+        f"IV={best['lower_iv']:.2f}%  bid={best['lower_bid']:.4f}"
+    )
+    print(
+        f"  BUY  2x {best['middle_symbol']:<17} strike={best['middle_strike']:.2f}  Δ={best['middle_delta']:.2f}  "
+        f"IV={best['middle_iv']:.2f}%  ask={best['middle_ask']:.4f}"
+    )
+    print(
+        f"  SELL {best['upper_symbol']:<20} strike={best['upper_strike']:.2f}  Δ={best['upper_delta']:.2f}  "
+        f"IV={best['upper_iv']:.2f}%  bid={best['upper_bid']:.4f}"
+    )
+    rr_summary = f"{best['reward_risk']:.2f}" if math.isfinite(best["reward_risk"]) else "N/A"
+    print(
+        f"  Net credit         : {best['net_credit']:.4f}  |  Max profit : {best['max_profit']:.4f}  "
+        f"|  Max loss : {best['max_loss']:.4f}  |  Reward/Risk : {rr_summary}"
+    )
+    print(
+        f"  Body IV edge       : {best['body_iv_edge']:.2f}pp vs GARCH  |  "
+        f"Wing richness : {best['wing_richness']:.2f}pp  |  "
+        f"Body distance : {best['body_distance_pct']*100:.2f}% from spot"
+    )
+    print(f"{'='*88}\n")
+
+
+asyncio.run(scan_short_call_butterfly_opportunities("PETR4", expiry_rank=2))

@@ -28,6 +28,7 @@ STRADDLE_SLEEP_SECONDS = 25
 VOLATILITY_SKEW = "VOLATILITY_SKEW"
 STRADDLE = "STRADDLE"
 PUT_SPREAD = "PUT_SPREAD"
+SHORT_CALL_BUTTERFLY = "SHORT_CALL_BUTTERFLY"
 
 ACTIVE_STRATEGY = PUT_SPREAD
 
@@ -41,6 +42,15 @@ PUT_SPREAD_MIN_IV_EDGE     = 2.0    # min (garch_vol - long_iv) in pp to enter (
 PUT_SPREAD_MAX_POSITIONS   = 2      # max open put spread sets allowed
 PUT_SPREAD_SLEEP_SECONDS   = 25
 PUT_SPREAD_CALL_WALL_OFFSET = 0.05  # target long-leg strike = call_wall * (1 + this)
+
+# ── Short Call Butterfly strategy parameters (short vol wings / long ATM body) ──
+SHORT_CALL_BUTTERFLY_EXPIRY_RANK = 1
+SHORT_CALL_BUTTERFLY_MAX_BODY_DISTANCE_PCT = 0.03  # body strike must stay within 3% of spot
+SHORT_CALL_BUTTERFLY_MIN_IV_EDGE = 1.0  # min (garch_vol - body_iv) in pp
+SHORT_CALL_BUTTERFLY_MIN_NET_CREDIT = 0.0  # require structure to be entered for at least flat cashflow
+SHORT_CALL_BUTTERFLY_MAX_POSITIONS = 1  # max butterfly sets allowed
+SHORT_CALL_BUTTERFLY_ORDER_SIZE = 100.0
+SHORT_CALL_BUTTERFLY_SLEEP_SECONDS = 25
 
 BRAZILIAN_HOLIDAYS = [
     "2026-02-16",
@@ -58,3 +68,4 @@ BRAZILIAN_HOLIDAYS = [
     "2026-12-25",
     "2026-12-31"
 ]
+

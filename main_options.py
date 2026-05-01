@@ -4,11 +4,15 @@ import asyncio
 from constants import (
     ASSET_SYMBOL, DIFF_IV_GARCH_PUTS_THRESHOLD_PCT, GARCH_SAMPLE_SIZE,
     IV_DIFF_THRESHOLD_CALLS, MIN_PUT_IV, STEEP_THRESHOLD, ANNUAL_TRADING_DAYS,
-    ACTIVE_STRATEGY, VOLATILITY_SKEW, STRADDLE, PUT_SPREAD,
+    ACTIVE_STRATEGY, VOLATILITY_SKEW, STRADDLE, PUT_SPREAD, SHORT_CALL_BUTTERFLY,
     STRADDLE_MAX_DELTA_IMBALANCE, STRADDLE_SLEEP_SECONDS,
     PUT_SPREAD_EXPIRY_RANK, PUT_SPREAD_LONG_DELTA_MIN, PUT_SPREAD_LONG_DELTA_MAX,
     PUT_SPREAD_SHORT_DELTA_MIN, PUT_SPREAD_SHORT_DELTA_MAX,
     PUT_SPREAD_MIN_IV_EDGE, PUT_SPREAD_MAX_POSITIONS, PUT_SPREAD_SLEEP_SECONDS,
+    SHORT_CALL_BUTTERFLY_EXPIRY_RANK, SHORT_CALL_BUTTERFLY_MAX_BODY_DISTANCE_PCT,
+    SHORT_CALL_BUTTERFLY_MIN_IV_EDGE, SHORT_CALL_BUTTERFLY_MIN_NET_CREDIT,
+    SHORT_CALL_BUTTERFLY_MAX_POSITIONS, SHORT_CALL_BUTTERFLY_ORDER_SIZE,
+    SHORT_CALL_BUTTERFLY_SLEEP_SECONDS,
 )
 from mt5_connector import MT5Connector
 from functions.quant_functions import QuantCalculation
@@ -19,6 +23,91 @@ from utils import Utils
 # ================================================================
 # Strategies — each one runs its own loop with its own trade logic
 # ================================================================
+
+def select_short_call_butterfly_candidate(utils, calls_dict, spot_price, garch_vol):
+    call_by_strike = {}
+    for call_delta, call_data in calls_dict.items():
+        strike = call_data["strike"]
+        current = call_by_strike.get(strike)
+        if current is None or abs(call_delta - 0.50) < abs(current[0] - 0.50):
+            call_by_strike[strike] = (call_delta, call_data)
+
+    if len(call_by_strike) < 3:
+        return None
+
+    quote_by_strike = {}
+    for strike, (_, call_data) in call_by_strike.items():
+        option_info = utils.get_option_info_with_quote(call_data["option_name"])
+        if option_info is None or option_info.bid <= 0.0 or option_info.ask <= 0.0:
+            continue
+        quote_by_strike[strike] = option_info
+
+    available_strikes = sorted(quote_by_strike.keys())
+    if len(available_strikes) < 3:
+        return None
+
+    best_candidate = None
+    available_strikes_set = set(available_strikes)
+    for middle_idx in range(1, len(available_strikes) - 1):
+        middle_strike = available_strikes[middle_idx]
+        body_distance_pct = abs(middle_strike - spot_price) / max(spot_price, 1.0)
+        if body_distance_pct > SHORT_CALL_BUTTERFLY_MAX_BODY_DISTANCE_PCT:
+            continue
+
+        for lower_strike in available_strikes[:middle_idx]:
+            wing_width = middle_strike - lower_strike
+            if wing_width <= 0:
+                continue
+
+            upper_strike = round(middle_strike + wing_width, 8)
+            if upper_strike not in available_strikes_set:
+                continue
+
+            lower_delta, lower_data = call_by_strike[lower_strike]
+            middle_delta, middle_data = call_by_strike[middle_strike]
+            upper_delta, upper_data = call_by_strike[upper_strike]
+            lower_quote = quote_by_strike[lower_strike]
+            middle_quote = quote_by_strike[middle_strike]
+            upper_quote = quote_by_strike[upper_strike]
+
+            net_credit = lower_quote.bid + upper_quote.bid - (2 * middle_quote.ask)
+            body_iv_edge = garch_vol - middle_data["iv"]
+            wing_richness = ((lower_data["iv"] + upper_data["iv"]) / 2) - middle_data["iv"]
+            score = (
+                body_iv_edge
+                + wing_richness
+                + net_credit
+                - (body_distance_pct * 100)
+            )
+
+            candidate = {
+                "score": score,
+                "body_iv_edge": body_iv_edge,
+                "wing_richness": wing_richness,
+                "net_credit": net_credit,
+                "body_distance_pct": body_distance_pct,
+                "wing_width": wing_width,
+                "lower_symbol": lower_data["option_name"],
+                "middle_symbol": middle_data["option_name"],
+                "upper_symbol": upper_data["option_name"],
+                "lower_strike": lower_strike,
+                "middle_strike": middle_strike,
+                "upper_strike": upper_strike,
+                "lower_delta": lower_delta,
+                "middle_delta": middle_delta,
+                "upper_delta": upper_delta,
+                "lower_iv": lower_data["iv"],
+                "middle_iv": middle_data["iv"],
+                "upper_iv": upper_data["iv"],
+                "lower_bid": lower_quote.bid,
+                "middle_ask": middle_quote.ask,
+                "upper_bid": upper_quote.bid,
+            }
+
+            if best_candidate is None or candidate["score"] > best_candidate["score"]:
+                best_candidate = candidate
+
+    return best_candidate
 
 async def strategy_volatility_skew(mt5_conn, quant_calc, utils, logger):
     """
@@ -557,9 +646,144 @@ async def strategy_put_spread(mt5_conn, quant_calc, utils, logger):
 
         await asyncio.sleep(PUT_SPREAD_SLEEP_SECONDS)
 
+
+async def strategy_short_call_butterfly(mt5_conn, quant_calc, utils, logger):
+    """
+    SHORT_CALL_BUTTERFLY strategy:
+    - Sell 1 lower-strike call
+    - Buy 2 ATM/near-ATM calls at the body strike
+    - Sell 1 higher-strike call
+    - Require symmetric call wings around the body strike
+    - Prefer setups where the body IV is cheap vs GARCH and the structure can be
+      opened for at least a flat-to-credit cashflow using live quotes
+    """
+    asset = ASSET_SYMBOL[0]
+
+    selected_asset = mt5_conn.symbol_select(asset, True)
+    if not selected_asset:
+        logger.error(f"Failed to select {asset}")
+        return
+
+    for _ in range(10):
+        tick = mt5_conn.get_mt5_connector().symbol_info_tick(asset)
+        if tick is not None and tick.bid > 0 and tick.ask > 0:
+            break
+        logger.info(f"Waiting for {asset} tick data after symbol_select...")
+        await asyncio.sleep(1)
+    else:
+        logger.error(f"{asset} still has no tick data after 10 s – check Market Watch")
+        return
+
+    while True:
+        mt5_conn.symbol_select(asset, True)
+        symbol_info = mt5_conn.get_symbol_info(asset)
+        if symbol_info is None or symbol_info.bid == 0.0 or symbol_info.ask == 0.0:
+            logger.warning(f"Underlying {asset} bid/ask is invalid, waiting...")
+            await asyncio.sleep(SHORT_CALL_BUTTERFLY_SLEEP_SECONDS)
+            continue
+
+        spot_prices_data = mt5_conn.get_data(
+            asset,
+            mt5_conn.get_mt5_connector().TIMEFRAME_D1,
+            GARCH_SAMPLE_SIZE,
+            0,
+        )["close"].values
+        garch_vol = quant_calc.agarch_estimation(spot_prices_data) * 100
+        logger.info(f"SHORT_CALL_BUTTERFLY | GARCH vol: {garch_vol:.2f}%")
+
+        chain_options = mt5_conn.get_option_names_by_expiration_time(
+            asset, expiry_rank_override=SHORT_CALL_BUTTERFLY_EXPIRY_RANK
+        )
+        if not chain_options:
+            logger.warning("SHORT_CALL_BUTTERFLY | No option chain returned for selected expiry rank")
+            await asyncio.sleep(SHORT_CALL_BUTTERFLY_SLEEP_SECONDS)
+            continue
+
+        expiration_time = next(iter(chain_options.keys()))
+        logger.info(
+            f"SHORT_CALL_BUTTERFLY | Expiry: {datetime.fromtimestamp(expiration_time)} "
+            f"(rank {SHORT_CALL_BUTTERFLY_EXPIRY_RANK})"
+        )
+
+        calls_dict, _ = utils.get_calls_and_puts_data(chain_options, symbol_info)
+        if not calls_dict:
+            logger.warning("SHORT_CALL_BUTTERFLY | calls_dict is empty, skipping iteration")
+            await asyncio.sleep(SHORT_CALL_BUTTERFLY_SLEEP_SECONDS)
+            continue
+
+        atm_price = (symbol_info.bid + symbol_info.ask) / 2
+        candidate = select_short_call_butterfly_candidate(utils, calls_dict, atm_price, garch_vol)
+        if candidate is None:
+            logger.info("SHORT_CALL_BUTTERFLY | No symmetric butterfly candidate found")
+            await asyncio.sleep(SHORT_CALL_BUTTERFLY_SLEEP_SECONDS)
+            continue
+
+        logger.info(
+            f"SHORT_CALL_BUTTERFLY | Best butterfly → "
+            f"SELL {candidate['lower_symbol']} strike={candidate['lower_strike']} Δ={candidate['lower_delta']:.2f} IV={candidate['lower_iv']:.2f}% | "
+            f"BUY 2x {candidate['middle_symbol']} strike={candidate['middle_strike']} Δ={candidate['middle_delta']:.2f} IV={candidate['middle_iv']:.2f}% | "
+            f"SELL {candidate['upper_symbol']} strike={candidate['upper_strike']} Δ={candidate['upper_delta']:.2f} IV={candidate['upper_iv']:.2f}% | "
+            f"wing={candidate['wing_width']:.2f} net_credit={candidate['net_credit']:.4f} "
+            f"body_iv_edge={candidate['body_iv_edge']:.2f}pp"
+        )
+
+        open_calls = utils.call_options_count()
+        iv_edge_condition = candidate["body_iv_edge"] >= SHORT_CALL_BUTTERFLY_MIN_IV_EDGE
+        credit_condition = candidate["net_credit"] >= SHORT_CALL_BUTTERFLY_MIN_NET_CREDIT
+        position_room = open_calls < SHORT_CALL_BUTTERFLY_MAX_POSITIONS * 3
+        order_allowed = iv_edge_condition and credit_condition and position_room
+
+        if not order_allowed:
+            logger.info(
+                f"SHORT_CALL_BUTTERFLY | Entry blocked — "
+                f"iv_edge_ok={iv_edge_condition} ({candidate['body_iv_edge']:.2f}pp >= {SHORT_CALL_BUTTERFLY_MIN_IV_EDGE}pp), "
+                f"credit_ok={credit_condition} ({candidate['net_credit']:.4f} >= {SHORT_CALL_BUTTERFLY_MIN_NET_CREDIT:.4f}), "
+                f"position_room={position_room} (open calls={open_calls} < {SHORT_CALL_BUTTERFLY_MAX_POSITIONS * 3})"
+            )
+            await asyncio.sleep(SHORT_CALL_BUTTERFLY_SLEEP_SECONDS)
+            continue
+
+        logger.info(
+            f"SHORT_CALL_BUTTERFLY | Placing structure: "
+            f"SELL {candidate['lower_symbol']} @ {candidate['lower_bid']:.4f} | "
+            f"BUY 2x {candidate['middle_symbol']} @ {candidate['middle_ask']:.4f} | "
+            f"SELL {candidate['upper_symbol']} @ {candidate['upper_bid']:.4f} "
+            f"base_volume={SHORT_CALL_BUTTERFLY_ORDER_SIZE}"
+        )
+
+        mt5_conn.place_order(
+            candidate["lower_symbol"],
+            MT5Connector.ORDER_TYPE_SELL,
+            SHORT_CALL_BUTTERFLY_ORDER_SIZE,
+            candidate["lower_bid"],
+            10,
+            f"SCBF-low d={candidate['lower_delta']:.2f} iv={candidate['lower_iv']:.1f}",
+        )
+        mt5_conn.place_order(
+            candidate["middle_symbol"],
+            MT5Connector.ORDER_TYPE_BUY,
+            SHORT_CALL_BUTTERFLY_ORDER_SIZE * 2,
+            candidate["middle_ask"],
+            10,
+            f"SCBF-mid d={candidate['middle_delta']:.2f} iv={candidate['middle_iv']:.1f}",
+        )
+        mt5_conn.place_order(
+            candidate["upper_symbol"],
+            MT5Connector.ORDER_TYPE_SELL,
+            SHORT_CALL_BUTTERFLY_ORDER_SIZE,
+            candidate["upper_bid"],
+            10,
+            f"SCBF-up d={candidate['upper_delta']:.2f} iv={candidate['upper_iv']:.1f}",
+        )
+
+        await asyncio.sleep(SHORT_CALL_BUTTERFLY_SLEEP_SECONDS)
+
 STRATEGY_MAP = {
     VOLATILITY_SKEW: strategy_volatility_skew,
-    STRADDLE: strategy_straddle,    PUT_SPREAD: strategy_put_spread,}
+    STRADDLE: strategy_straddle,
+    PUT_SPREAD: strategy_put_spread,
+    SHORT_CALL_BUTTERFLY: strategy_short_call_butterfly,
+}
 
 
 async def main():
