@@ -1,3 +1,23 @@
+# ── Data source configuration ────────────────────────────────
+# Switch ACTIVE_DATA_SOURCE to change the market-data platform.
+# Execution (orders, positions) is always handled by MT5.
+DATA_SOURCE_MT5  = "MT5"
+DATA_SOURCE_IBKR = "IBKR"
+ACTIVE_DATA_SOURCE = DATA_SOURCE_IBKR
+
+# ── Interactive Brokers TWS / IB Gateway connection ──────────
+# 7496 = live TWS, 7497 = paper TWS / IB Gateway paper trading
+IBKR_HOST      = "127.0.0.1"
+IBKR_PORT      = 4002
+IBKR_CLIENT_ID = 1
+
+# Per-symbol IBKR contract configuration.
+# Keys = symbol name; Values = dict with: secType, exchange, currency.
+# Symbols not listed default to: secType="STK", exchange="BVMF", currency="BRL".
+IBKR_SYMBOL_CONFIG: dict = {
+    "SPX": {"secType": "IND", "exchange": "CBOE", "currency": "USD"},
+}
+
 PERIODS = 60
 SHIFT_PERIODS = 0 
 MAGIC_NUMBER = 345346
@@ -10,7 +30,7 @@ TARGET_OPTION_EXPIRY_RANK = 3  # analyze the 3rd upcoming option expiration from
 STRIKE_PRICE_OFFSET = 0.05 # 5% above and below current price
 TYPE_BUY = 0
 TYPE_SELL = 1
-ASSET_SYMBOL = ["BOVA11", "VALE3", "PETR4"] #, "GOAU4", "BBAS3", "BRAV3", "ITUB4", "BBDC4", "MGLU3", "RAIZ4"]
+ASSET_SYMBOL = ["SPX","BRR"]#["BOVA11", "VALE3", "PETR4", "GOAU4", "BBAS3", "BRAV3", "ITUB4", "BBDC4", "MGLU3", "RAIZ4"]
 GARCH_SAMPLE_SIZE = 55  # Number of trading days in a year
 ANNUAL_TRADING_DAYS = 252
 IV_DIFF_THRESHOLD = 0.01  # 5% difference threshold for implied volatility

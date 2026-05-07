@@ -11,7 +11,9 @@ from constants import (
     SHORT_CALL_BUTTERFLY_MAX_BODY_DISTANCE_PCT,
     SHORT_CALL_BUTTERFLY_MIN_IV_EDGE,
     SHORT_CALL_BUTTERFLY_MIN_NET_CREDIT,
+    ACTIVE_DATA_SOURCE, DATA_SOURCE_IBKR,
 )
+from data_source_service import DataSourceService
 from functions.gamma_exposure_calc import bs_gamma, implied_vol_newton, infer_right_from_symbol_name
 from mt5_connector import MT5Connector
 import asyncio
@@ -298,27 +300,56 @@ async def close_all_positions_test():
     mt5_conn.close_all_positions()
 
 async def get_options_names():
-    mt5_conn = MT5Connector()
+    svc   = DataSourceService()
     utils = Utils()
-    if not mt5_conn.initialize():
-        print("MT5 initialization failed")
+    if not svc.initialize():
+        print("Data source initialization failed")
         return None
-    chain_options = mt5_conn.get_option_names_by_expiration_time(ASSET_SYMBOL[2])
-    print(f"Options names for {ASSET_SYMBOL[2]}: {chain_options}")
-    expiration_time = list(chain_options.keys())[0]
-    print(f"Expiration time for options: {time.fromtimestamp(expiration_time)}")
-    selected_asset = mt5_conn.symbol_select(ASSET_SYMBOL[2],True)
-    if not selected_asset:
-        print(f"Failed to select {ASSET_SYMBOL[2]}")
-        return None
-    symbol_info = mt5_conn.get_symbol_info(ASSET_SYMBOL[2])
 
-    if symbol_info is None:
-        print(f"Failed to get symbol info for {ASSET_SYMBOL[2]}")
-        return None
-    calls_dict, puts_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
-    print(f"Calls data: {calls_dict}")
-    print(f"Puts data: {puts_dict}")
+    symbol = ASSET_SYMBOL[0]
+
+    if svc.active_source == DATA_SOURCE_IBKR:
+        # ── IBKR path: get expirations + strikes from TWS ────────────────────
+        params_list = svc.get_option_params(symbol)
+        if not params_list:
+            print(f"No option parameters returned for {symbol} from IBKR")
+            return None
+
+        print(f"\nOption parameters for {symbol} (IBKR):")
+        for params in params_list:
+            print(f"  Exchange    : {params['exchange']}")
+            print(f"  Expirations : {params['expirations']}")
+            print(f"  Strikes     : {params['strikes']}")
+            print(f"  Multiplier  : {params['multiplier']}")
+
+        symbol_info = svc.get_symbol_info(symbol)
+        if symbol_info is None:
+            print(f"Failed to get symbol info for {symbol}")
+            return None
+        print(f"\nSpot quote — bid: {symbol_info.bid:.4f}  ask: {symbol_info.ask:.4f}")
+        return params_list
+
+    else:
+        # ── MT5 path: existing behaviour ─────────────────────────────────────
+        chain_options = svc.get_option_names_by_expiration_time(symbol)
+        if not chain_options:
+            print(f"No option chain returned for {symbol}")
+            return None
+        print(f"Options names for {symbol}: {chain_options}")
+        expiration_time = list(chain_options.keys())[0]
+        print(f"Expiration time for options: {datetime.fromtimestamp(expiration_time)}")
+        selected_asset = svc.symbol_select(symbol, True)
+        if not selected_asset:
+            print(f"Failed to select {symbol}")
+            return None
+        symbol_info = svc.get_symbol_info(symbol)
+        if symbol_info is None:
+            print(f"Failed to get symbol info for {symbol}")
+            return None
+        calls_dict, puts_dict = utils.get_calls_and_puts_data(chain_options, symbol_info)
+        print(f"Calls data: {calls_dict}")
+        print(f"Puts data: {puts_dict}")
+        return chain_options
 
 async def get_total_put_deltas():
     mt5_conn = MT5Connector()
@@ -923,4 +954,4 @@ async def scan_short_call_butterfly_opportunities(
     print(f"{'='*88}\n")
 
 
-asyncio.run(scan_short_call_butterfly_opportunities("PETR4", expiry_rank=2))
+asyncio.run(get_options_names())
